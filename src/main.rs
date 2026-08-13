@@ -6,7 +6,9 @@
 mod headings;
 mod html;
 mod langmap;
+mod overlay;
 mod scan;
+mod search;
 mod sidebar;
 mod theme;
 
@@ -115,7 +117,13 @@ struct WindowCtx {
     force_full: Cell<bool>,
     /// anchor to jump to once the pending document finishes loading
     pending_anchor: RefCell<Option<String>>,
+    /// search query to highlight once the pending document finishes loading
+    pending_search: RefCell<Option<String>>,
     sidebar: RefCell<Option<Rc<sidebar::Sidebar>>>,
+    overlay: RefCell<Option<Rc<overlay::SearchOverlay>>>,
+    /// browse root in directory mode; drives Ctrl+N and Quick Open
+    root_dir: RefCell<Option<PathBuf>>,
+    all_files: Rc<RefCell<Vec<PathBuf>>>,
 }
 
 fn trace(started: Instant, what: &str) {
@@ -172,7 +180,11 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         base_uri: RefCell::new(String::new()),
         force_full: Cell::new(false),
         pending_anchor: RefCell::new(None),
+        pending_search: RefCell::new(None),
         sidebar: RefCell::new(None),
+        overlay: RefCell::new(None),
+        root_dir: RefCell::new(None),
+        all_files: Rc::new(RefCell::new(Vec::new())),
     });
 
     // JS → Rust bridge. Payloads are JSON strings (or, for openDiagram, the
@@ -198,6 +210,11 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             if s.starts_with("{\"type\":\"loadComplete\"") {
                 if let Some(anchor) = ctx.pending_anchor.borrow_mut().take() {
                     scroll_to_anchor(&ctx, &anchor);
+                }
+                if let Some(query) = ctx.pending_search.borrow_mut().take() {
+                    let js = format!("highlightSearchQuery({});", html::json_str(&query));
+                    ctx.webview
+                        .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
                 }
             }
             // headings from the live document arrive here too — the sidebar
@@ -235,6 +252,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         }
         Target::Dir(dir) => {
             apply_chrome_css(&ctx.palette);
+            ctx.root_dir.replace(Some(dir.clone()));
             let sb = {
                 let ctx = ctx.clone();
                 Rc::new(sidebar::Sidebar::new(&dir, move |action| match action {
@@ -261,18 +279,70 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                 .shrink_start_child(false)
                 .resize_start_child(false)
                 .build();
-            window.set_child(Some(&paned));
+
+            // Quick Open / Find in Files float above the content (§6.5).
+            let search_overlay = {
+                let ctx = ctx.clone();
+                let accent = ctx.palette.get("accent").to_string();
+                let all_files = ctx.all_files.clone();
+                overlay::SearchOverlay::new(
+                    &dir,
+                    all_files,
+                    &accent,
+                    move |action| match action {
+                        overlay::OverlayAction::Open(path) => {
+                            load_path(&ctx, &path);
+                        }
+                        overlay::OverlayAction::OpenWithSearch(path, query) => {
+                            if ctx.doc_path.borrow().as_deref() == Some(path.as_path()) {
+                                let js = format!(
+                                    "highlightSearchQuery({});",
+                                    html::json_str(&query)
+                                );
+                                ctx.webview.evaluate_javascript(
+                                    &js,
+                                    None,
+                                    None,
+                                    None::<&gio::Cancellable>,
+                                    |_| {},
+                                );
+                            } else if load_path(&ctx, &path) {
+                                ctx.pending_search.replace(Some(query));
+                            }
+                        }
+                    },
+                )
+            };
+            {
+                // focus returns to the document whenever the overlay closes
+                let webview = webview.clone();
+                search_overlay.widget.connect_visible_notify(move |w| {
+                    if !w.is_visible() {
+                        webview.grab_focus();
+                    }
+                });
+            }
+            let overlay_container = gtk4::Overlay::new();
+            overlay_container.set_child(Some(&paned));
+            search_overlay.widget.set_halign(gtk4::Align::Center);
+            search_overlay.widget.set_valign(gtk4::Align::Start);
+            search_overlay.widget.set_margin_top(48);
+            overlay_container.add_overlay(&search_overlay.widget);
+            window.set_child(Some(&overlay_container));
             ctx.sidebar.replace(Some(sb.clone()));
+            ctx.overlay.replace(Some(search_overlay));
 
             load_auto_index(&ctx, &dir);
 
             // Stream the scan into the Navigator (§9.1: first rows early).
             let rx = scan::scan_markdown(&dir);
+            let all_files = ctx.all_files.clone();
             glib::spawn_future_local(async move {
                 let mut first = true;
                 let mut total = 0usize;
                 while let Ok(batch) = rx.recv().await {
                     total += batch.len();
+                    all_files.borrow_mut().extend(batch.iter().cloned());
                     sb.add_files(&batch);
                     if first {
                         trace(started, "scan first rows");
@@ -283,9 +353,109 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             });
         }
     }
+    install_vim_keys(&ctx);
     trace(started, "load_html issued");
 
     window.present();
+}
+
+/// Bare-key bindings (§6.5): vim keys are baseline, not a power-user
+/// affordance. Captured at the window so they work while the webview has
+/// focus, and stand down whenever the search overlay is open (typing).
+fn install_vim_keys(ctx: &Rc<WindowCtx>) {
+    let keys = gtk4::EventControllerKey::new();
+    keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let ctx_keys = ctx.clone();
+    let pending_g = Rc::new(Cell::new(false));
+    keys.connect_key_pressed(move |_, keyval, _, state| {
+        let ctx = &ctx_keys;
+        if ctx.overlay.borrow().as_ref().is_some_and(|o| o.is_open()) {
+            return glib::Propagation::Proceed;
+        }
+        let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+        let scroll = |js: &str| {
+            ctx.webview
+                .evaluate_javascript(js, None, None, None::<&gio::Cancellable>, |_| {});
+            glib::Propagation::Stop
+        };
+        let g_was_pending = pending_g.replace(false);
+        match keyval {
+            gdk::Key::j if !ctrl => scroll("window.scrollBy(0, 80);"),
+            gdk::Key::k if !ctrl => scroll("window.scrollBy(0, -80);"),
+            gdk::Key::d if ctrl => scroll("window.scrollBy(0, window.innerHeight / 2);"),
+            gdk::Key::u if ctrl => scroll("window.scrollBy(0, -window.innerHeight / 2);"),
+            gdk::Key::G => scroll("window.scrollTo(0, document.body.scrollHeight);"),
+            gdk::Key::g if !ctrl => {
+                if g_was_pending {
+                    return scroll("window.scrollTo(0, 0);");
+                }
+                pending_g.set(true);
+                glib::Propagation::Stop
+            }
+            gdk::Key::slash => {
+                if let Some(overlay) = &*ctx.overlay.borrow() {
+                    overlay.open(overlay::Mode::Filename);
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            }
+            gdk::Key::question => {
+                show_shortcuts_dialog(&ctx.window);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    });
+    ctx.window.add_controller(keys);
+}
+
+/// The `?` overlay is the entire discoverability story (§6.5) — it replaces
+/// the menu, so it lists everything.
+fn show_shortcuts_dialog(window: &gtk4::ApplicationWindow) {
+    if !libadwaita::is_initialized() && libadwaita::init().is_err() {
+        return;
+    }
+    let dialog = libadwaita::ShortcutsDialog::new();
+    let add_section = |title: &str, items: &[(&str, &str)]| {
+        let section = libadwaita::ShortcutsSection::new(Some(title));
+        for (name, accel) in items {
+            section.add(libadwaita::ShortcutsItem::new(name, accel));
+        }
+        section
+    };
+    dialog.add(add_section(
+        "Finding",
+        &[
+            ("Quick Open", "<Control>p"),
+            ("Find in Files", "<Control><Shift>f"),
+            ("Focus search", "slash"),
+            ("Switch search mode", "Tab"),
+            ("Open result", "Return"),
+            ("Dismiss", "Escape"),
+        ],
+    ));
+    dialog.add(add_section(
+        "Reading",
+        &[
+            ("Scroll down / up", "j k"),
+            ("Half page down / up", "<Control>d <Control>u"),
+            ("Top of document", "g g"),
+            ("End of document", "<Shift>g"),
+            ("Zoom in / out", "<Control>plus <Control>minus"),
+            ("Reset zoom", "<Control>0"),
+            ("Force full render", "<Control><Shift>r"),
+        ],
+    ));
+    dialog.add(add_section(
+        "Windows",
+        &[
+            ("Toggle Navigator", "<Control>b"),
+            ("New window", "<Control>n"),
+            ("Open link in new window", "<Control>Pointer_Button1"),
+            ("Shortcuts", "question"),
+        ],
+    ));
+    libadwaita::prelude::AdwDialogExt::present(&dialog, Some(window));
 }
 
 fn scroll_to_anchor(ctx: &Rc<WindowCtx>, id: &str) {
@@ -310,12 +480,24 @@ window {{ background-color: {bg}; color: {fg}; }}
 .moremaid-sidebar listview row:hover {{ background-color: {selection}; }}
 .moremaid-heading-row {{ color: {dim}; font-size: 90%; }}
 paned > separator {{ background-color: {muted}; min-width: 1px; }}
+.moremaid-overlay {{ background-color: {raised}; color: {fg}; border: 1px solid {muted}; border-radius: 8px; padding: 10px; }}
+.moremaid-overlay entry {{ background-color: {bg}; color: {fg}; caret-color: {fg}; border: 1px solid {muted}; }}
+.moremaid-overlay entry selection {{ background-color: {selection}; }}
+.moremaid-overlay listview, .moremaid-overlay listview row {{ background: transparent; }}
+.moremaid-overlay listview row:selected {{ background-color: {selection}; }}
+.moremaid-overlay-mode {{ color: {dim}; font-size: 90%; }}
+.moremaid-overlay-snippet {{ color: {dim}; font-size: 90%; font-family: monospace; }}
 "#,
         bg = palette.get("background"),
         fg = palette.get("foreground"),
         selection = palette.get("selection"),
         dim = palette.get("dark_foreground"),
         muted = palette.get("muted"),
+        raised = if palette.dark {
+            palette.get("lighter_background")
+        } else {
+            palette.get("darker_background")
+        },
     );
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(&css);
@@ -657,8 +839,31 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
             sb.widget.set_visible(!sb.widget.is_visible());
         }
     });
+    let quick_open = make("quick-open", ctx, |c| {
+        if let Some(overlay) = &*c.overlay.borrow() {
+            overlay.open(overlay::Mode::Filename);
+        }
+    });
+    let find_in_files = make("find-in-files", ctx, |c| {
+        if let Some(overlay) = &*c.overlay.borrow() {
+            overlay.open(overlay::Mode::Content);
+        }
+    });
+    let new_window = make("new-window", ctx, |c| {
+        let target = c
+            .root_dir
+            .borrow()
+            .clone()
+            .or_else(|| c.doc_path.borrow().clone());
+        if let Some(target) = target {
+            spawn_window_for(&target);
+        }
+    });
 
-    for a in [&zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar] {
+    for a in [
+        &zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar,
+        &quick_open, &find_in_files, &new_window,
+    ] {
         ctx.window.add_action(a);
     }
     // Ctrl for the app; Super is the compositor's and must never be bound (§6.5).
@@ -667,4 +872,7 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     app.set_accels_for_action("win.zoom-reset", &["<Control>0", "<Control>KP_0"]);
     app.set_accels_for_action("win.force-render", &["<Control><Shift>r"]);
     app.set_accels_for_action("win.toggle-sidebar", &["<Control>b"]);
+    app.set_accels_for_action("win.quick-open", &["<Control>p"]);
+    app.set_accels_for_action("win.find-in-files", &["<Control><Shift>f"]);
+    app.set_accels_for_action("win.new-window", &["<Control>n"]);
 }
