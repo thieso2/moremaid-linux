@@ -76,6 +76,32 @@
       ]
     },
     {
+      "name": "prototype keys and empty headings",
+      "markdown": "##\n\n## ???\n\n## Constructor\n\n## Constructor\n",
+      "headings": [
+        { "level": 2, "text": "", "id": "" },
+        { "level": 2, "text": "???", "id": "-1" },
+        { "level": 2, "text": "Constructor", "id": "constructor" },
+        { "level": 2, "text": "Constructor", "id": "constructor-1" }
+      ]
+    },
+    {
+      "name": "entities and underscore emphasis",
+      "markdown": "## Ben &amp; Jerry\n\n## _em_ word\n\n## __proto__\n",
+      "headings": [
+        { "level": 2, "text": "Ben & Jerry", "id": "ben-jerry" },
+        { "level": 2, "text": "em word", "id": "em-word" },
+        { "level": 2, "text": "proto", "id": "proto" }
+      ]
+    },
+    {
+      "name": "indented fence is a code block",
+      "markdown": "    ```\n\n# Real heading\n",
+      "headings": [
+        { "level": 1, "text": "Real heading", "id": "real-heading" }
+      ]
+    },
+    {
       "name": "dashes collapse",
       "markdown": "## a -- b\n\n##   leading and trailing   \n",
       "headings": [

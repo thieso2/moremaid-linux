@@ -138,6 +138,12 @@ struct WindowCtx {
     text_scale: Cell<f64>,
     /// kept alive for the text-scaling-factor changed signal
     interface_settings: RefCell<Option<gio::Settings>>,
+    /// monotonically increasing per-load token, echoed back by the page's
+    /// loadComplete so a superseded page cannot consume the next page's
+    /// pending anchor or search highlight
+    load_seq: Cell<u64>,
+    /// true once the CURRENT load's loadComplete arrived
+    load_complete: Cell<bool>,
 }
 
 fn trace(started: Instant, what: &str) {
@@ -206,6 +212,8 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         app_zoom: Cell::new(1.0),
         text_scale: Cell::new(1.0),
         interface_settings: RefCell::new(None),
+        load_seq: Cell::new(0),
+        load_complete: Cell::new(false),
     });
     watch_text_scaling(&ctx);
 
@@ -230,13 +238,21 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                 }
             }
             if s.starts_with("{\"type\":\"loadComplete\"") {
-                if let Some(anchor) = ctx.pending_anchor.borrow_mut().take() {
-                    scroll_to_anchor(&ctx, &anchor);
-                }
-                if let Some(query) = ctx.pending_search.borrow_mut().take() {
-                    let js = format!("highlightSearchQuery({});", html::json_str(&query));
-                    ctx.webview
-                        .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+                // only the CURRENT load's completion may consume pending
+                // work — a superseded page's message must not (token check)
+                let token = serde_json::from_str::<serde_json::Value>(&s)
+                    .ok()
+                    .and_then(|v| v.get("token")?.as_u64());
+                if token == Some(ctx.load_seq.get()) {
+                    ctx.load_complete.set(true);
+                    if let Some(anchor) = ctx.pending_anchor.borrow_mut().take() {
+                        scroll_to_anchor(&ctx, &anchor);
+                    }
+                    if let Some(query) = ctx.pending_search.borrow_mut().take() {
+                        let js = format!("highlightSearchQuery({});", html::json_str(&query));
+                        ctx.webview
+                            .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+                    }
                 }
             }
             if s.starts_with("{\"type\":\"headings\"") {
@@ -293,13 +309,19 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                         load_path(&ctx, &path);
                     }
                     sidebar::SidebarAction::ScrollTo { file, id } => {
-                        if ctx.doc_path.borrow().as_deref() == Some(file.as_path()) {
+                        if ctx.doc_path.borrow().as_deref() == Some(file.as_path())
+                            && ctx.load_complete.get()
+                        {
                             scroll_to_anchor(&ctx, &id);
-                        } else if load_path(&ctx, &file) {
-                            // set only after the load was issued — a failed
-                            // load must not leave a stale anchor for the next
-                            // unrelated page's loadComplete to consume
-                            ctx.pending_anchor.replace(Some(id));
+                        } else {
+                            // the doc may already be the target but still
+                            // loading — then the pending path applies too
+                            let same = ctx.doc_path.borrow().as_deref() == Some(file.as_path());
+                            if same || load_path(&ctx, &file) {
+                                // set only after the load was issued — a
+                                // failed load must not leave a stale anchor
+                                ctx.pending_anchor.replace(Some(id));
+                            }
                         }
                     }
                 }))
@@ -327,7 +349,9 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                             load_path(&ctx, &path);
                         }
                         overlay::OverlayAction::OpenWithSearch(path, query) => {
-                            if ctx.doc_path.borrow().as_deref() == Some(path.as_path()) {
+                            if ctx.doc_path.borrow().as_deref() == Some(path.as_path())
+                                && ctx.load_complete.get()
+                            {
                                 let js = format!(
                                     "highlightSearchQuery({});",
                                     html::json_str(&query)
@@ -339,8 +363,12 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                                     None::<&gio::Cancellable>,
                                     |_| {},
                                 );
-                            } else if load_path(&ctx, &path) {
-                                ctx.pending_search.replace(Some(query));
+                            } else {
+                                let same =
+                                    ctx.doc_path.borrow().as_deref() == Some(path.as_path());
+                                if same || load_path(&ctx, &path) {
+                                    ctx.pending_search.replace(Some(query));
+                                }
                             }
                         }
                     },
@@ -726,6 +754,8 @@ paned > separator {{ background-color: {muted}; min-width: 1px; }}
 /// Directory view: the auto-index page (§8 empty states included).
 fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
     ctx.pending_anchor.replace(None);
+    ctx.load_seq.set(ctx.load_seq.get() + 1);
+    ctx.load_complete.set(false);
     // a directory listing is not a watched document
     ctx.doc_watcher.replace(None);
     let mut entries = Vec::new();
@@ -771,6 +801,7 @@ fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
         &title,
         &entries,
         parent_href.as_deref(),
+        ctx.load_seq.get(),
     );
     let base = doc_base_uri(dir);
     ctx.doc_path.replace(None);
@@ -862,6 +893,8 @@ fn finish_not_found(request: &webkit6::URISchemeRequest, uri: &str) {
 fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
     // any navigation supersedes a pending heading jump
     ctx.pending_anchor.replace(None);
+    ctx.load_seq.set(ctx.load_seq.get() + 1);
+    ctx.load_complete.set(false);
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -882,9 +915,10 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
             &file_name,
             &content,
             ctx.force_full.get(),
+            ctx.load_seq.get(),
         )
     } else {
-        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, &file_name, &content)
+        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, &file_name, &content, ctx.load_seq.get())
     };
 
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -898,11 +932,13 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
 }
 
 fn load_stdin(ctx: &Rc<WindowCtx>, src: String) {
+    ctx.load_seq.set(ctx.load_seq.get() + 1);
+    ctx.load_complete.set(false);
     // Base path is the CWD so relative links and images resolve from where
     // the command ran (§8). No live reload — there is nothing to watch.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let base = doc_base_uri(&cwd);
-    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "(stdin)", &src, ctx.force_full.get());
+    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "(stdin)", &src, ctx.force_full.get(), ctx.load_seq.get());
     ctx.stdin_src.replace(Some(src));
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some("(stdin) — Moremaid"));
@@ -957,20 +993,24 @@ fn connect_link_policy(ctx: &Rc<WindowCtx>, _app: &gtk4::Application) {
             let path = glib::Uri::unescape_string(without_fragment, None)
                 .map(|g| PathBuf::from(g.to_string()))
                 .unwrap_or_else(|| PathBuf::from(without_fragment));
+            // Rust wart (§5): modifiers() is a bare u32, not a typed
+            // gdk::ModifierType. Compare against bits().
+            let modifiers = action.modifiers();
+            let button = action.mouse_button();
+            let new_window = button == 2
+                || modifiers & gdk::ModifierType::CONTROL_MASK.bits() != 0
+                || modifiers & gdk::ModifierType::SHIFT_MASK.bits() != 0;
             if path.is_dir() {
                 decision.ignore();
-                load_auto_index(&ctx, &path);
+                if new_window {
+                    spawn_window_for(&path);
+                } else {
+                    load_auto_index(&ctx, &path);
+                }
                 return true;
             }
             if path.is_file() && is_text_file(&path) {
                 decision.ignore();
-                // Rust wart (§5): modifiers() is a bare u32, not a typed
-                // gdk::ModifierType. Compare against bits().
-                let modifiers = action.modifiers();
-                let button = action.mouse_button();
-                let new_window = button == 2
-                    || modifiers & gdk::ModifierType::CONTROL_MASK.bits() != 0
-                    || modifiers & gdk::ModifierType::SHIFT_MASK.bits() != 0;
                 if new_window {
                     spawn_window_for(&path);
                 } else {

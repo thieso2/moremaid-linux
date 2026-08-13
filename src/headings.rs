@@ -46,11 +46,10 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
             continue;
         };
 
+        // Empty headings ("##") stay: markdown-it renders <h2 id=""> for
+        // them, and skipping would shift every later dedup counter.
         let slug_source = clean_inline(&raw, true, &refs);
         let display = clean_inline(&raw, false, &refs).trim().to_string();
-        if display.is_empty() && slug_source.trim().is_empty() {
-            continue;
-        }
 
         let base = slugify(&slug_source);
         // Dedup exactly as page.js does: first occurrence keeps the bare
@@ -89,7 +88,7 @@ pub fn slugify(s: &str) -> String {
                 pending_dash = false;
             }
             out.push(c);
-        } else if c.is_whitespace() {
+        } else if is_js_whitespace(c) {
             pending_dash = true;
         }
         // any other char: removed, contributes nothing (not even a break)
@@ -109,6 +108,20 @@ pub fn slugify(s: &str) -> String {
         }
     }
     collapsed.trim_matches('-').to_string()
+}
+
+/// JS `\s`, not Rust `char::is_whitespace` — the classes differ: U+FEFF is
+/// `\s` only in JS, U+0085 (NEL) is White_Space only in Rust. The slug must
+/// match what the JS regex does.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' '
+            | '\u{a0}' | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+            | '\u{feff}'
+    )
 }
 
 /// ATX headings only (matches the reference; setext is a known gap).
@@ -144,15 +157,26 @@ fn parse_heading(line: &str) -> Option<(u8, String)> {
     {
         text = trimmed.trim_end().to_string();
     }
-    if text.is_empty() {
-        return None;
-    }
+    // an empty text is still a heading — "##" renders as <h2 id="">
     Some((level, text))
 }
 
 /// `(marker, run length, has info string)` when the line opens/closes a fence.
+/// At most 3 leading spaces — 4+ is an indented code block (CommonMark), and
+/// treating it as a fence would swallow every heading after it.
 fn match_fence(line: &str) -> Option<(char, usize, bool)> {
-    let trimmed = line.trim_start_matches(' ');
+    let mut spaces = 0;
+    for c in line.chars() {
+        if c == ' ' && spaces < 4 {
+            spaces += 1;
+        } else {
+            break;
+        }
+    }
+    if spaces > 3 {
+        return None;
+    }
+    let trimmed = &line[spaces..];
     let first = trimmed.chars().next()?;
     if first != '`' && first != '~' {
         return None;
@@ -259,6 +283,26 @@ fn clean_inline(
                 }
             }
             '`' | '*' | '~' => i += 1,
+            '&' => {
+                if let Some((decoded, next)) = parse_entity(&chars, i) {
+                    out.push(decoded);
+                    i = next;
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+            '_' => {
+                // markdown-it resolves _em_/__strong__ but disallows
+                // intraword `_` emphasis — snake_case survives untouched
+                if let Some((inner, next)) = parse_underscore_emphasis(&chars, i) {
+                    out.push_str(&clean_inline(&inner, include_image_alt, refs));
+                    i = next;
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
             _ => {
                 out.push(c);
                 i += 1;
@@ -266,6 +310,70 @@ fn clean_inline(
         }
     }
     out
+}
+
+/// `&amp;` and friends — markdown-it's token content is entity-decoded.
+fn parse_entity(chars: &[char], start: usize) -> Option<(char, usize)> {
+    let semi = chars[start + 1..start + 1 + 32.min(chars.len() - start - 1)]
+        .iter()
+        .position(|&c| c == ';')?;
+    let entity: String = chars[start + 1..start + 1 + semi].iter().collect();
+    if entity.is_empty() || entity.contains(char::is_whitespace) {
+        return None;
+    }
+    let decoded = match entity.as_str() {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        _ => {
+            let value = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                entity.strip_prefix('#')?.parse::<u32>().ok()?
+            };
+            char::from_u32(value)?
+        }
+    };
+    Some((decoded, start + 1 + semi + 1))
+}
+
+/// A balanced `_…_` / `__…__` pair at word boundaries. Returns the inner
+/// text and the index after the closing run, or None when the run is
+/// intraword (snake_case) or unbalanced (renders literally).
+fn parse_underscore_emphasis(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let prev_alnum = start > 0 && chars[start - 1].is_alphanumeric();
+    if prev_alnum {
+        return None; // intraword — not emphasis in markdown-it
+    }
+    let open_len = chars[start..].iter().take_while(|&&c| c == '_').count();
+    let after_open = start + open_len;
+    match chars.get(after_open) {
+        Some(c) if !c.is_whitespace() && *c != '_' => {}
+        _ => return None, // "_ x" or trailing run — literal
+    }
+    // find a closing run: preceded by non-space, followed by non-alnum/end
+    let mut j = after_open;
+    while j < chars.len() {
+        if chars[j] == '_' && !chars[j - 1].is_whitespace() {
+            let close_len = chars[j..].iter().take_while(|&&c| c == '_').count();
+            let after_close = j + close_len;
+            let next_ok = chars
+                .get(after_close)
+                .map(|c| !c.is_alphanumeric())
+                .unwrap_or(true);
+            if next_ok {
+                let inner: String = chars[after_open..j].iter().collect();
+                return Some((inner, after_close));
+            }
+            j = after_close;
+        } else {
+            j += 1;
+        }
+    }
+    None
 }
 
 /// At `chars[start] == '['`: match `[label](dest)`, `[label][ref]` (defined

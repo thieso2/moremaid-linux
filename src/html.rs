@@ -115,6 +115,7 @@ pub fn markdown_page(
     title: &str,
     markdown: &str,
     force_full: bool,
+    token: u64,
 ) -> String {
     let plain = !force_full
         && (markdown.len() > PLAIN_SIZE_LIMIT
@@ -135,7 +136,7 @@ pub fn markdown_page(
 <body>
     {banner}<div class="container"><div id="content"></div></div>
     <script>
-var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: {plain} }};
+var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: {plain}, loadToken: {token} }};
 var rawMarkdown = {markdown_json};
 var documentTitle = {title_json};
 {page_js}
@@ -151,7 +152,7 @@ var documentTitle = {title_json};
     )
 }
 
-pub fn code_page(web: &Path, palette: &Palette, fonts: &Fonts, file_name: &str, content: &str) -> String {
+pub fn code_page(web: &Path, palette: &Palette, fonts: &Fonts, file_name: &str, content: &str, token: u64) -> String {
     let language = crate::langmap::language_for_file(file_name);
     format!(
         r#"<!DOCTYPE html>
@@ -162,7 +163,7 @@ pub fn code_page(web: &Path, palette: &Palette, fonts: &Fonts, file_name: &str, 
 <body>
     <div class="container"><pre><code class="language-{language}">{content}</code></pre></div>
     <script>
-var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: false }};
+var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: false, loadToken: {token} }};
 var documentTitle = {title_json};
 {page_js}
     </script>
@@ -194,6 +195,7 @@ pub fn auto_index_page(
     title: &str,
     entries: &[IndexEntry],
     parent_href: Option<&str>,
+    token: u64,
 ) -> String {
     let body = if entries.is_empty() {
         // Empty states get a message, never a blank window (§8).
@@ -245,7 +247,7 @@ pub fn auto_index_page(
 <body>
     <div class="container">{nav}<h1>{title_h}</h1>{body}</div>
     <script>
-var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: false }};
+var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: false, loadToken: {token} }};
 var documentTitle = {title_json};
 {page_js}
     </script>

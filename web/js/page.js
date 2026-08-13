@@ -161,7 +161,9 @@ if (md && typeof markdownitTaskLists !== 'undefined') {
 // Heading ID generation (slugify + deduplicate).
 // KEEP BYTE-IDENTICAL to the Rust HeadingParser — shared fixture in
 // tests/fixtures/slugs.json runs against both sides (HANDOFF §9.3).
-var _headingIds = {};
+// Object.create(null): with a plain {} a slug like "constructor" hits the
+// prototype chain and the first occurrence becomes "constructor-NaN".
+var _headingIds = Object.create(null);
 function slugify(s) {
     return s.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 }
@@ -207,7 +209,7 @@ md.renderer.rules.fence = function(tokens, idx, options, env, self) {
 }
 
 function renderMarkdown(src) {
-    _headingIds = {};
+    _headingIds = Object.create(null);
     return md.render(src);
 }
 
@@ -327,7 +329,9 @@ document.addEventListener('DOMContentLoaded', async function() {
             }).catch(function(e) { console.error(e); });
         }
     }
-    postToHost({ type: 'loadComplete' });
+    // the token lets the host tell THIS page's completion apart from a
+    // superseded one racing on the main loop
+    postToHost({ type: 'loadComplete', token: __MOREMAID__.loadToken });
 });
 
 /* ---------------------------------------------------------------- live re-render */

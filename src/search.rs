@@ -186,6 +186,21 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// §9.1: Quick Open keystroke → filtered list ≤16 ms at 10k entries.
+    /// Run with: cargo test --release quick_open_latency -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn quick_open_latency_at_10k() {
+        let candidates: Vec<String> = (0..10_000)
+            .map(|i| format!("dir{:02}/sub{}/document-name-{i:04}.md", i % 20, i % 10))
+            .collect();
+        let start = std::time::Instant::now();
+        let ranked = fuzzy_rank(&candidates, "docname");
+        let elapsed = start.elapsed();
+        println!("fuzzy_rank over 10k entries: {elapsed:?} ({} hits)", ranked.len());
+        assert!(!ranked.is_empty());
+    }
+
     #[test]
     fn fuzzy_ranking_prefers_tighter_matches() {
         let candidates = vec![
