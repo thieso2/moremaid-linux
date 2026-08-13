@@ -9,60 +9,88 @@ layer (CSS/JS in `web/`) is extracted from the macOS app at pinned commit
 `a3ab7fd` and adapted; vendored web dependencies and their exact pins are
 recorded in `web/vendor/VERSIONS.md`.
 
-**Status: Milestone 2** — it opens files and browses directories. Quick Open,
-Find in Files, the `?` shortcuts overlay, and live reload land in
-Milestones 3–4.
+**Status: all five milestones of the build plan implemented.** It opens
+files, browses directories, finds things, live-reloads, and packages.
 
 ## Running
 
 ```bash
 moremaid README.md            # open a markdown file
+mm README.md                  # same binary, shorter to type
 moremaid docs/                # browse a directory (Navigator + index page)
 moremaid                      # browse the current directory
 moremaid src/main.rs          # any text file renders as highlighted code
 cat notes.md | moremaid       # stdin; relative links resolve from the CWD
 ```
 
-Directory mode scans recursively, respecting `.gitignore` (also outside git
-repositories) and skipping `.git`/`node_modules`. The Navigator lists
-folders, markdown files, and the headings inside each file — click a heading
-to jump to it. Heading anchors are guaranteed to match the rendered page:
-a shared fixture (`tests/fixtures/slugs.json`) pins the slug algorithm on
-both the Rust and JavaScript side.
+Files can also be dropped onto the window, or opened from a file manager
+(the package associates with `text/markdown` without grabbing the default).
 
-Keyboard: `Ctrl+B` toggle the Navigator, `Ctrl` `+` / `-` / `0` zoom,
-`Ctrl+Shift+R` force full render of a large document. `Ctrl+click` /
-middle-click / `Shift+click` on an internal link opens it in a new window.
+## Keyboard
 
-## Theming
+`?` or `F1` shows the complete shortcuts overlay. The essentials:
 
-Moremaid follows the active Omarchy theme, live, and ships zero themes of its
-own. The palette is read from
-`~/.local/state/omarchy/current/theme/colors.toml`; prose, code highlighting
-and Mermaid diagrams all derive from it. Off Omarchy it falls back to a
-built-in palette chosen by the system light/dark preference.
+| binding | action |
+|---|---|
+| `Ctrl+P` or `/` | Quick Open — fuzzy filename finder |
+| `Ctrl+Shift+F` | Find in Files — full-text, streamed |
+| `Tab` | switch search mode (filename ↔ content) |
+| `Ctrl+B` | toggle the Navigator |
+| `j` `k`, `gg` `G`, `Ctrl+D` `Ctrl+U` | scroll (vim keys are baseline) |
+| `Ctrl` `+` `-` `0` | zoom (on top of the system text scale) |
+| `Ctrl+N` | new window |
+| `Ctrl+Shift+R` | force full render of a large document |
+| `Ctrl+click` / middle-click | open link in new window |
 
-The web rendering layer is plain files on disk. To restyle without a
-toolchain, copy `web/` to `~/.local/share/moremaid/web/` and edit — that copy
-takes precedence over the packaged one. `MOREMAID_WEB_DIR` overrides both.
+## Live behaviour
 
-## Building
+- An open file that changes on disk re-renders in place — scroll position
+  survives, and unchanged Mermaid diagrams are served from cache (a
+  prose-only edit re-renders zero diagrams).
+- A deleted or replaced file keeps the last good render behind a dismissible
+  banner, and recovers when the path returns (branch switches).
+- An Omarchy theme switch recolours prose, code highlighting, diagrams and
+  the Navigator live — no reload, scroll untouched. Off Omarchy the system
+  light/dark preference drives a built-in palette.
 
-```bash
-# runtime deps
-pacman -S gtk4 libadwaita webkitgtk-6.0 xdg-desktop-portal-gtk ttf-ia-writer
-# build
-pacman -S rust
-cargo build --release
+## Configuration
+
+`~/.config/moremaid/config.toml` — optional, every key defaulted, key names
+stable. A commented example ships at
+`/usr/share/doc/moremaid/config.toml.example`:
+
+```toml
+[font]
+body = "iA Writer Quattro S"
+mono = "monospace"          # bare generic = follow the `omarchy font` choice
+size = 16                   # base px, before text-scaling-factor
 ```
 
-`ttf-ia-writer` is a hard dependency, not a preference — WebKitGTK's SVG
-renderer can silently drop every Mermaid label when the configured font family
-is missing.
+The web rendering layer is plain files on disk. To restyle without a
+toolchain, copy `/usr/share/moremaid/web/` to `~/.local/share/moremaid/web/`
+and edit — the user copy takes precedence. `MOREMAID_WEB_DIR` overrides both.
+
+## Installing
+
+```bash
+# from a checkout
+cd packaging && makepkg -si
+
+# or by hand
+cargo build --release
+sudo install -Dm755 target/release/moremaid /usr/bin/moremaid
+sudo cp -r web /usr/share/moremaid/web
+```
+
+Runtime dependencies: `gtk4 libadwaita webkitgtk-6.0 xdg-desktop-portal-gtk
+ttf-ia-writer`. Every one is load-bearing — `xdg-desktop-portal-gtk` because
+Hyprland's portal implements no file chooser, and `ttf-ia-writer` because
+WebKitGTK's SVG renderer can silently drop every Mermaid label when the
+configured font family is missing.
 
 ## Recommended Hyprland rules
 
-Add to `~/.config/hypr/` config (Moremaid does not write to your config):
+Add to your Hyprland config (Moremaid does not write to your config):
 
 ```conf
 # Float the Mermaid diagram viewer instead of splitting your reading window
@@ -75,12 +103,17 @@ windowrule = opacity 1 1, class:org.moremaid.Moremaid
 
 ## Tests
 
-Two suites, and both must run — the JS half won't run under `cargo test`:
+Two suites, and both must run — the JS half won't run under `cargo test`
+and is the half that gets forgotten (§9.6):
 
 ```bash
 cargo test
-node tests/slugs.test.js     # slug fixture, once it lands with the Navigator (M2)
+node tests/slugs.test.js    # slug fixture through the SHIPPED page.js pipeline
+node tests/page.test.js     # the page.js surface Rust calls by name
 ```
+
+The release checklist is: run all three, tag, bump `pkgver` in
+`packaging/PKGBUILD`.
 
 ## Debugging
 

@@ -3,6 +3,7 @@
 //! One window per invocation, no in-app tabs, no session restore (§6.1).
 //! The compositor owns window management; the app renders documents.
 
+mod config;
 mod headings;
 mod html;
 mod langmap;
@@ -111,6 +112,7 @@ struct WindowCtx {
     webview: webkit6::WebView,
     window: gtk4::ApplicationWindow,
     palette: RefCell<theme::Palette>,
+    fonts: config::Fonts,
     web_dir: PathBuf,
     doc_path: RefCell<Option<PathBuf>>,
     stdin_src: RefCell<Option<String>>,
@@ -130,6 +132,12 @@ struct WindowCtx {
     doc_watcher: RefCell<Option<watch::DirWatcher>>,
     /// watches ~/.local/state/omarchy/current/ for theme switches
     theme_watcher: RefCell<Option<watch::DirWatcher>>,
+    /// the app's own zoom factor; effective content zoom is this times the
+    /// system text-scaling-factor (§6.4)
+    app_zoom: Cell<f64>,
+    text_scale: Cell<f64>,
+    /// kept alive for the text-scaling-factor changed signal
+    interface_settings: RefCell<Option<gio::Settings>>,
 }
 
 fn trace(started: Instant, what: &str) {
@@ -143,6 +151,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
     // Palette is read synchronously before the first load_html so there is
     // never a flash of the wrong colours (§6.3, §9.5).
     let palette = theme::Palette::load(adw_dark_hint);
+    let fonts = config::load().fonts();
     trace(started, "palette loaded");
 
     ensure_uri_scheme(&web_dir);
@@ -180,6 +189,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         webview: webview.clone(),
         window: window.clone(),
         palette: RefCell::new(palette),
+        fonts,
         web_dir,
         doc_path: RefCell::new(None),
         stdin_src: RefCell::new(None),
@@ -193,7 +203,11 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         all_files: Rc::new(RefCell::new(Vec::new())),
         doc_watcher: RefCell::new(None),
         theme_watcher: RefCell::new(None),
+        app_zoom: Cell::new(1.0),
+        text_scale: Cell::new(1.0),
+        interface_settings: RefCell::new(None),
     });
+    watch_text_scaling(&ctx);
 
     // JS → Rust bridge. Payloads are JSON strings (or, for openDiagram, the
     // raw diagram definition) — see web/js/page.js.
@@ -270,7 +284,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             load_stdin(&ctx, src);
         }
         Target::Dir(dir) => {
-            apply_chrome_css(&ctx.palette.borrow());
+            apply_chrome_css(&ctx.palette.borrow(), &ctx.fonts);
             ctx.root_dir.replace(Some(dir.clone()));
             let sb = {
                 let ctx = ctx.clone();
@@ -373,6 +387,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         }
     }
     install_vim_keys(&ctx);
+    install_drop_target(&ctx);
     trace(started, "load_html issued");
 
     window.present();
@@ -569,16 +584,67 @@ fn retheme(ctx: &Rc<WindowCtx>) {
     if let Ok(bg) = new.get("background").parse::<gdk::RGBA>() {
         ctx.webview.set_background_color(&bg);
     }
-    apply_chrome_css(&new);
+    apply_chrome_css(&new, &ctx.fonts);
     let js = format!(
         "applyPalette({}, {}, {});",
-        new.css_vars_json(16),
-        new.mermaid_vars_json(),
+        new.css_vars_json(&ctx.fonts),
+        new.mermaid_vars_json(&ctx.fonts),
         html::json_str(if new.dark { "dark" } else { "light" }),
     );
     ctx.webview
         .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
     *ctx.palette.borrow_mut() = new;
+}
+
+/// GTK chrome honours text-scaling-factor automatically; WebKit content
+/// does not (§6.4). effective content zoom = app zoom × text-scaling-factor,
+/// live-updated when `omarchy display text size` changes the gsettings key.
+fn watch_text_scaling(ctx: &Rc<WindowCtx>) {
+    let Some(source) = gio::SettingsSchemaSource::default() else {
+        return;
+    };
+    if source.lookup("org.gnome.desktop.interface", true).is_none() {
+        return;
+    }
+    let settings = gio::Settings::new("org.gnome.desktop.interface");
+    ctx.text_scale.set(settings.double("text-scaling-factor"));
+    apply_zoom(ctx);
+    {
+        let ctx = ctx.clone();
+        settings.connect_changed(Some("text-scaling-factor"), move |s, _| {
+            ctx.text_scale.set(s.double("text-scaling-factor"));
+            apply_zoom(&ctx);
+        });
+    }
+    ctx.interface_settings.replace(Some(settings));
+}
+
+fn apply_zoom(ctx: &Rc<WindowCtx>) {
+    let scale = ctx.text_scale.get();
+    let scale = if scale.is_finite() && scale > 0.1 { scale } else { 1.0 };
+    ctx.webview.set_zoom_level(ctx.app_zoom.get() * scale);
+}
+
+/// Drag a file onto the window to read it (§1 "Fitting in").
+fn install_drop_target(ctx: &Rc<WindowCtx>) {
+    let drop = gtk4::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
+    let ctx_drop = ctx.clone();
+    drop.connect_drop(move |_, value, _, _| {
+        let ctx = &ctx_drop;
+        let Ok(file) = value.get::<gio::File>() else {
+            return false;
+        };
+        let Some(path) = file.path() else { return false };
+        if path.is_dir() {
+            spawn_window_for(&path);
+            true
+        } else if is_text_file(&path) {
+            load_path(ctx, &path)
+        } else {
+            false
+        }
+    });
+    ctx.window.add_controller(drop);
 }
 
 fn parse_headings_message(s: &str) -> Option<Vec<headings::Heading>> {
@@ -624,11 +690,11 @@ thread_local! {
 /// Style the little GTK chrome there is (the Navigator) from the same
 /// palette as the document, with the body face (§6.3, §6.4). One provider,
 /// reloaded in place on retheme.
-fn apply_chrome_css(palette: &theme::Palette) {
+fn apply_chrome_css(palette: &theme::Palette, fonts: &config::Fonts) {
     let css = format!(
         r#"
 window {{ background-color: {bg}; color: {fg}; }}
-.moremaid-sidebar {{ background-color: {bg}; color: {fg}; font-family: "iA Writer Quattro S", "Noto Sans", sans-serif; }}
+.moremaid-sidebar {{ background-color: {bg}; color: {fg}; font-family: {font_body}; }}
 .moremaid-sidebar listview, .moremaid-sidebar listview row {{ background: transparent; }}
 .moremaid-sidebar listview row:selected {{ background-color: {selection}; }}
 .moremaid-sidebar listview row:hover {{ background-color: {selection}; }}
@@ -642,6 +708,7 @@ paned > separator {{ background-color: {muted}; min-width: 1px; }}
 .moremaid-overlay-mode {{ color: {dim}; font-size: 90%; }}
 .moremaid-overlay-snippet {{ color: {dim}; font-size: 90%; font-family: monospace; }}
 "#,
+        font_body = fonts.body_stack,
         bg = palette.get("background"),
         fg = palette.get("foreground"),
         selection = palette.get("selection"),
@@ -700,6 +767,7 @@ fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
     let page = html::auto_index_page(
         &ctx.web_dir,
         &ctx.palette.borrow(),
+        &ctx.fonts,
         &title,
         &entries,
         parent_href.as_deref(),
@@ -810,12 +878,13 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
         html::markdown_page(
             &ctx.web_dir,
             &ctx.palette.borrow(),
+            &ctx.fonts,
             &file_name,
             &content,
             ctx.force_full.get(),
         )
     } else {
-        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &file_name, &content)
+        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, &file_name, &content)
     };
 
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -833,7 +902,7 @@ fn load_stdin(ctx: &Rc<WindowCtx>, src: String) {
     // the command ran (§8). No live reload — there is nothing to watch.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let base = doc_base_uri(&cwd);
-    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), "(stdin)", &src, ctx.force_full.get());
+    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "(stdin)", &src, ctx.force_full.get());
     ctx.stdin_src.replace(Some(src));
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some("(stdin) — Moremaid"));
@@ -948,7 +1017,7 @@ fn open_diagram_window(app: &gtk4::Application, ctx: &Rc<WindowCtx>, definition:
         .title("Mermaid Diagram — Moremaid")
         .child(&webview)
         .build();
-    let page = html::diagram_page(&ctx.palette.borrow(), definition);
+    let page = html::diagram_page(&ctx.palette.borrow(), &ctx.fonts, definition);
     webview.load_html(&page, Some("moremaid://assets/"));
     window.present();
 }
@@ -962,12 +1031,19 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     };
 
     let zoom_in = make("zoom-in", ctx, |c| {
-        c.webview.set_zoom_level((c.webview.zoom_level() * 1.1).min(5.0));
+        c.app_zoom.set((c.app_zoom.get() * 1.1).min(5.0));
+        apply_zoom(c);
     });
     let zoom_out = make("zoom-out", ctx, |c| {
-        c.webview.set_zoom_level((c.webview.zoom_level() / 1.1).max(0.25));
+        c.app_zoom.set((c.app_zoom.get() / 1.1).max(0.25));
+        apply_zoom(c);
     });
-    let zoom_reset = make("zoom-reset", ctx, |c| c.webview.set_zoom_level(1.0));
+    // Ctrl+0 resets the app's own factor while still respecting the
+    // system text scale (§6.4)
+    let zoom_reset = make("zoom-reset", ctx, |c| {
+        c.app_zoom.set(1.0);
+        apply_zoom(c);
+    });
     let force_render = make("force-render", ctx, |c| {
         // Force full render of a large document (§8); populates the diagram
         // cache normally.

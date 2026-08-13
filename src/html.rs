@@ -4,6 +4,7 @@
 //! document stylesheet inlined so there is never a flash of unstyled content
 //! (§9.5). Skeleton ported from HTMLGenerator.swift @ a3ab7fd.
 
+use crate::config::Fonts;
 use crate::theme::Palette;
 use gtk4::glib;
 use std::path::{Path, PathBuf};
@@ -90,7 +91,7 @@ pub fn count_mermaid_fences(markdown: &str) -> usize {
         .count()
 }
 
-fn head_common(web: &Path, palette: &Palette, title: &str) -> String {
+fn head_common(web: &Path, palette: &Palette, fonts: &Fonts, title: &str) -> String {
     format!(
         r#"<meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -101,7 +102,7 @@ fn head_common(web: &Path, palette: &Palette, title: &str) -> String {
 {prism_css}
     </style>"#,
         title = html_escape(title),
-        palette_css = palette.css_block(16),
+        palette_css = palette.css_block(fonts),
         base_css = asset(web, "css/base.css"),
         prism_css = asset(web, "css/prism-theme.css"),
     )
@@ -110,6 +111,7 @@ fn head_common(web: &Path, palette: &Palette, title: &str) -> String {
 pub fn markdown_page(
     web: &Path,
     palette: &Palette,
+    fonts: &Fonts,
     title: &str,
     markdown: &str,
     force_full: bool,
@@ -141,15 +143,15 @@ var documentTitle = {title_json};
 </body>
 </html>"#,
         mode = if palette.dark { "dark" } else { "light" },
-        head = head_common(web, palette, title),
-        mermaid_vars = palette.mermaid_vars_json(),
+        head = head_common(web, palette, fonts, title),
+        mermaid_vars = palette.mermaid_vars_json(fonts),
         markdown_json = json_str(markdown),
         title_json = json_str(title),
         page_js = asset(web, "js/page.js"),
     )
 }
 
-pub fn code_page(web: &Path, palette: &Palette, file_name: &str, content: &str) -> String {
+pub fn code_page(web: &Path, palette: &Palette, fonts: &Fonts, file_name: &str, content: &str) -> String {
     let language = crate::langmap::language_for_file(file_name);
     format!(
         r#"<!DOCTYPE html>
@@ -167,8 +169,8 @@ var documentTitle = {title_json};
 </body>
 </html>"#,
         mode = if palette.dark { "dark" } else { "light" },
-        head = head_common(web, palette, file_name),
-        mermaid_vars = palette.mermaid_vars_json(),
+        head = head_common(web, palette, fonts, file_name),
+        mermaid_vars = palette.mermaid_vars_json(fonts),
         content = html_escape(content),
         title_json = json_str(file_name),
         page_js = asset(web, "js/page.js"),
@@ -188,6 +190,7 @@ pub struct IndexEntry {
 pub fn auto_index_page(
     web: &Path,
     palette: &Palette,
+    fonts: &Fonts,
     title: &str,
     entries: &[IndexEntry],
     parent_href: Option<&str>,
@@ -249,13 +252,13 @@ var documentTitle = {title_json};
 </body>
 </html>"#,
         mode = if palette.dark { "dark" } else { "light" },
-        head = head_common(web, palette, title),
+        head = head_common(web, palette, fonts, title),
         // lives outside the sortable table so it can't be re-ordered away
         nav = parent_href
             .map(|href| format!(r#"<div class="nav-bar"><a href="{}">&uarr; ..</a></div>"#, html_escape(href)))
             .unwrap_or_default(),
         title_h = html_escape(title),
-        mermaid_vars = palette.mermaid_vars_json(),
+        mermaid_vars = palette.mermaid_vars_json(fonts),
         title_json = json_str(title),
         page_js = asset(web, "js/page.js"),
     )
@@ -274,7 +277,7 @@ fn human_size(bytes: u64) -> String {
 /// The standalone diagram viewer (zoom dropdown, Ctrl +/− zoom, pan).
 /// Ported from HTMLGenerator.diagramPage @ a3ab7fd; palette-fed, macOS key
 /// hints swapped for their Linux equivalents.
-pub fn diagram_page(palette: &Palette, definition: &str) -> String {
+pub fn diagram_page(palette: &Palette, fonts: &Fonts, definition: &str) -> String {
     let raised = if palette.dark { palette.get("lighter_background") } else { palette.get("darker_background") };
     format!(
         r#"<!DOCTYPE html>
@@ -480,9 +483,9 @@ pub fn diagram_page(palette: &Palette, definition: &str) -> String {
         muted = palette.get("muted"),
         red = palette.get("red"),
         raised = raised,
-        font_body = crate::theme::FONT_BODY,
+        font_body = fonts.body_stack,
         definition_json = json_str(definition),
-        mermaid_vars = palette.mermaid_vars_json(),
+        mermaid_vars = palette.mermaid_vars_json(fonts),
     )
 }
 

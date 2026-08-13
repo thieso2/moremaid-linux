@@ -6,9 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const FONT_BODY: &str = r#""iA Writer Quattro S", "Noto Sans", sans-serif"#;
-/// Bare generic — resolves to the `omarchy font` choice via fontconfig (§6.4).
-pub const FONT_CODE: &str = "monospace";
+use crate::config::Fonts;
 
 const PALETTE_KEYS: &[&str] = &[
     "accent", "selection", "muted",
@@ -127,17 +125,17 @@ impl Palette {
     /// Every CSS custom property the rendering layer consumes, as data —
     /// the `:root` block and the live-retheme JSON both derive from this
     /// one list so they can never drift apart.
-    pub fn css_vars(&self, font_size_px: u32) -> Vec<(&'static str, String)> {
+    pub fn css_vars(&self, fonts: &Fonts) -> Vec<(&'static str, String)> {
         let accent = self.get("accent").to_string();
         let raised = self.raised().to_string();
         let dim_fg = self.get("dark_foreground").to_string();
         let red = self.get("red").to_string();
         let (r, g, b) = parse_hex(self.get("background")).unwrap_or((0, 0, 0));
         vec![
-            ("--font-body", FONT_BODY.to_string()),
-            ("--font-heading", FONT_BODY.to_string()),
-            ("--font-code", FONT_CODE.to_string()),
-            ("--font-size-base", format!("{font_size_px}px")),
+            ("--font-body", fonts.body_stack.clone()),
+            ("--font-heading", fonts.body_stack.clone()),
+            ("--font-code", fonts.mono_stack.clone()),
+            ("--font-size-base", format!("{}px", fonts.size)),
             ("--line-height", "1.6".into()),
             ("--paragraph-spacing", "1em".into()),
             ("--max-width", "800px".into()),
@@ -180,9 +178,9 @@ impl Palette {
     }
 
     /// The `:root` custom-property block interpolated into every page.
-    pub fn css_block(&self, font_size_px: u32) -> String {
+    pub fn css_block(&self, fonts: &Fonts) -> String {
         let mut out = String::from(":root {\n");
-        for (name, value) in self.css_vars(font_size_px) {
+        for (name, value) in self.css_vars(fonts) {
             out.push_str(&format!("    {name}: {value};\n"));
         }
         out.push_str("}\n");
@@ -191,9 +189,9 @@ impl Palette {
 
     /// The same variables as a JSON object for `applyPalette` (§6.3: on
     /// theme change, update `:root` in place — never reload the page).
-    pub fn css_vars_json(&self, font_size_px: u32) -> String {
+    pub fn css_vars_json(&self, fonts: &Fonts) -> String {
         let body: Vec<String> = self
-            .css_vars(font_size_px)
+            .css_vars(fonts)
             .iter()
             .map(|(name, value)| {
                 format!("{}: {}", crate::html::json_str(name), crate::html::json_str(value))
@@ -206,10 +204,11 @@ impl Palette {
     /// prose, code and diagrams are one palette. The explicit fontFamily is
     /// load-bearing — WebKitGTK's SVG renderer can drop every label when
     /// Mermaid uses generic families (§6.4, the Mermaid font trap).
-    pub fn mermaid_vars_json(&self) -> String {
+    pub fn mermaid_vars_json(&self, fonts: &Fonts) -> String {
         let raised = self.raised();
         format!(
-            r#"{{"fontFamily": "\"iA Writer Quattro S\", \"Noto Sans\", sans-serif", "darkMode": {dark}, "background": "{bg}", "primaryColor": "{accent}", "primaryTextColor": "{bg}", "primaryBorderColor": "{muted}", "secondaryColor": "{raised}", "secondaryTextColor": "{fg}", "tertiaryColor": "{bg}", "tertiaryTextColor": "{fg}", "lineColor": "{fg}", "textColor": "{fg}", "mainBkg": "{accent}", "clusterBkg": "{raised}", "clusterBorder": "{muted}", "titleColor": "{bright_fg}", "edgeLabelBackground": "{bg}", "noteBkgColor": "{raised}", "noteTextColor": "{fg}", "noteBorderColor": "{muted}", "errorBkgColor": "{red}", "errorTextColor": "{bg}"}}"#,
+            r#"{{"fontFamily": "\"{family}\", \"Noto Sans\", sans-serif", "darkMode": {dark}, "background": "{bg}", "primaryColor": "{accent}", "primaryTextColor": "{bg}", "primaryBorderColor": "{muted}", "secondaryColor": "{raised}", "secondaryTextColor": "{fg}", "tertiaryColor": "{bg}", "tertiaryTextColor": "{fg}", "lineColor": "{fg}", "textColor": "{fg}", "mainBkg": "{accent}", "clusterBkg": "{raised}", "clusterBorder": "{muted}", "titleColor": "{bright_fg}", "edgeLabelBackground": "{bg}", "noteBkgColor": "{raised}", "noteTextColor": "{fg}", "noteBorderColor": "{muted}", "errorBkgColor": "{red}", "errorTextColor": "{bg}"}}"#,
+            family = fonts.body_family,
             dark = self.dark,
             bg = self.get("background"),
             accent = self.get("accent"),
@@ -279,9 +278,10 @@ mod tests {
     #[test]
     fn css_block_and_json_stay_in_sync() {
         let p = Palette::fallback(true);
-        let block = p.css_block(16);
-        let json = p.css_vars_json(16);
-        for (name, value) in p.css_vars(16) {
+        let fonts = crate::config::Config::default().fonts();
+        let block = p.css_block(&fonts);
+        let json = p.css_vars_json(&fonts);
+        for (name, value) in p.css_vars(&fonts) {
             assert!(block.contains(&format!("{name}: {value};")), "{name} missing from block");
             assert!(json.contains(&format!("\"{name}\"")), "{name} missing from json");
         }

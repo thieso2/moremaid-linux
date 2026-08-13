@@ -1,0 +1,56 @@
+# Maintainer: Thies C. Arntzen <thieso@gmail.com>
+#
+# Moremaid for Linux — a markdown reader with first-class Mermaid diagram
+# support, built for Omarchy/Hyprland. AUR is the distribution channel and
+# pacman is the updater (HANDOFF §10). Cut releases from git tags; bump
+# pkgver here. Until a public remote exists, build from a local clone:
+#   makepkg -si  (with source=() pointing at your checkout, see below)
+
+pkgname=moremaid
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="Markdown reader with first-class Mermaid diagram support, for Omarchy/Hyprland"
+arch=('x86_64')
+url="https://github.com/thieso2/moremaid-linux"
+license=('MIT')
+# Every depends entry is load-bearing (HANDOFF §3):
+# - xdg-desktop-portal-gtk: hyprland's portal implements no file chooser
+# - ttf-ia-writer: WebKitGTK's SVG renderer can drop every Mermaid label
+#   when the configured font family is missing — hard depends, not opt
+depends=('gtk4' 'libadwaita' 'webkitgtk-6.0' 'xdg-desktop-portal-gtk' 'ttf-ia-writer')
+makedepends=('rust' 'git')
+source=("$pkgname::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+build() {
+    cd "$pkgname"
+    cargo build --release --locked
+}
+
+check() {
+    cd "$pkgname"
+    cargo test --release --locked
+    # the JS half of the slug fixture won't run under cargo test (§9.6)
+    command -v node >/dev/null && node tests/slugs.test.js && node tests/page.test.js
+}
+
+package() {
+    cd "$pkgname"
+    install -Dm755 target/release/moremaid "$pkgdir/usr/bin/moremaid"
+    # the mm alias — same binary, shorter to type
+    ln -s moremaid "$pkgdir/usr/bin/mm"
+
+    # the rendering layer ships as data files on disk (§4): a user copy in
+    # ~/.local/share/moremaid/web takes precedence, no toolchain needed
+    install -dm755 "$pkgdir/usr/share/moremaid"
+    cp -r web "$pkgdir/usr/share/moremaid/web"
+
+    install -Dm644 packaging/moremaid.desktop "$pkgdir/usr/share/applications/moremaid.desktop"
+    for size in 16 32 64 128 256 512; do
+        install -Dm644 "packaging/icons/moremaid-$size.png" \
+            "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/moremaid.png"
+    done
+
+    install -Dm644 packaging/config.toml "$pkgdir/usr/share/doc/moremaid/config.toml.example"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/moremaid/README.md"
+}
