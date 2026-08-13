@@ -11,6 +11,7 @@ mod scan;
 mod search;
 mod sidebar;
 mod theme;
+mod watch;
 
 use gtk4::gdk;
 use gtk4::gio;
@@ -109,7 +110,7 @@ fn parse_target(args: &[String]) -> Result<Target, String> {
 struct WindowCtx {
     webview: webkit6::WebView,
     window: gtk4::ApplicationWindow,
-    palette: theme::Palette,
+    palette: RefCell<theme::Palette>,
     web_dir: PathBuf,
     doc_path: RefCell<Option<PathBuf>>,
     stdin_src: RefCell<Option<String>>,
@@ -124,6 +125,11 @@ struct WindowCtx {
     /// browse root in directory mode; drives Ctrl+N and Quick Open
     root_dir: RefCell<Option<PathBuf>>,
     all_files: Rc<RefCell<Vec<PathBuf>>>,
+    /// watches the open document's parent directory (§9.4); dropping it
+    /// stops the previous watch when the document changes
+    doc_watcher: RefCell<Option<watch::DirWatcher>>,
+    /// watches ~/.local/state/omarchy/current/ for theme switches
+    theme_watcher: RefCell<Option<watch::DirWatcher>>,
 }
 
 fn trace(started: Instant, what: &str) {
@@ -173,7 +179,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
     let ctx = Rc::new(WindowCtx {
         webview: webview.clone(),
         window: window.clone(),
-        palette,
+        palette: RefCell::new(palette),
         web_dir,
         doc_path: RefCell::new(None),
         stdin_src: RefCell::new(None),
@@ -185,6 +191,8 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         overlay: RefCell::new(None),
         root_dir: RefCell::new(None),
         all_files: Rc::new(RefCell::new(Vec::new())),
+        doc_watcher: RefCell::new(None),
+        theme_watcher: RefCell::new(None),
     });
 
     // JS → Rust bridge. Payloads are JSON strings (or, for openDiagram, the
@@ -217,8 +225,17 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                         .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
                 }
             }
-            // headings from the live document arrive here too — the sidebar
-            // parses files itself, so they are unused for now (M4 revisits).
+            if s.starts_with("{\"type\":\"headings\"") {
+                // live reload can change the heading set — keep the
+                // Navigator's rows for the open file in sync
+                let doc = ctx.doc_path.borrow().clone();
+                let sb = ctx.sidebar.borrow().clone();
+                if let (Some(doc), Some(sb)) = (doc, sb) {
+                    if let Some(hs) = parse_headings_message(&s) {
+                        sb.update_headings(&doc, hs);
+                    }
+                }
+            }
         });
     }
     {
@@ -241,6 +258,8 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         });
     }
 
+    arm_theme_watcher(&ctx);
+
     match target {
         Target::File(path) => {
             window.set_child(Some(&webview));
@@ -251,7 +270,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             load_stdin(&ctx, src);
         }
         Target::Dir(dir) => {
-            apply_chrome_css(&ctx.palette);
+            apply_chrome_css(&ctx.palette.borrow());
             ctx.root_dir.replace(Some(dir.clone()));
             let sb = {
                 let ctx = ctx.clone();
@@ -283,7 +302,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             // Quick Open / Find in Files float above the content (§6.5).
             let search_overlay = {
                 let ctx = ctx.clone();
-                let accent = ctx.palette.get("accent").to_string();
+                let accent = ctx.palette.borrow().get("accent").to_string();
                 let all_files = ctx.all_files.clone();
                 overlay::SearchOverlay::new(
                     &dir,
@@ -458,6 +477,126 @@ fn show_shortcuts_dialog(window: &gtk4::ApplicationWindow) {
     libadwaita::prelude::AdwDialogExt::present(&dialog, Some(window));
 }
 
+/// Live reload (§9.4, M4): watch the open document's parent directory and
+/// push changes through reRenderMarkdown/reRenderCode — never load_html, so
+/// scroll position and the diagram cache survive. Deleted or replaced file →
+/// keep the last good render behind a dismissible banner; reload and clear
+/// if the path returns (§8 — the usual cause is a branch switch).
+fn arm_doc_watcher(ctx: &Rc<WindowCtx>) {
+    let Some(path) = ctx.doc_path.borrow().clone() else {
+        return;
+    };
+    let Some(dir) = path.parent() else { return };
+    let Some((debouncer, rx)) = watch::watch_dir(dir) else {
+        return;
+    };
+    // dropping the previous debouncer closes its channel, ending its loop
+    ctx.doc_watcher.replace(Some(debouncer));
+    let ctx = ctx.clone();
+    glib::spawn_future_local(async move {
+        while let Ok(paths) = rx.recv().await {
+            if ctx.doc_path.borrow().as_deref() != Some(path.as_path()) {
+                break;
+            }
+            if !paths.iter().any(|p| p == &path) {
+                continue;
+            }
+            refresh_doc(&ctx, &path);
+        }
+    });
+}
+
+fn refresh_doc(ctx: &Rc<WindowCtx>, path: &Path) {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let js = match std::fs::read_to_string(path) {
+        Ok(content) => {
+            if langmap::is_markdown(&file_name) {
+                format!(
+                    "moremaidClearBanner(); reRenderMarkdown({});",
+                    html::json_str(&content)
+                )
+            } else {
+                format!(
+                    "moremaidClearBanner(); reRenderCode({}, {});",
+                    html::json_str(&content),
+                    html::json_str(langmap::language_for_file(&file_name)),
+                )
+            }
+        }
+        Err(_) => format!(
+            "moremaidShowBanner({});",
+            html::json_str(&format!(
+                "{file_name} is gone — keeping the last good render. It will reload if the file returns."
+            )),
+        ),
+    };
+    ctx.webview
+        .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+}
+
+/// Theme switches (§6.3): light↔dark arrives via StyleManager only off
+/// Omarchy; the common case — Tokyo Night → Nord, same mode — signals
+/// nothing, so watch ~/.local/state/omarchy/current/ (the PARENT directory;
+/// the theme dir is replaced wholesale and a watch on it goes stale).
+fn arm_theme_watcher(ctx: &Rc<WindowCtx>) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let current = PathBuf::from(&home).join(".local/state/omarchy/current");
+    if current.is_dir() {
+        if let Some((debouncer, rx)) = watch::watch_dir(&current) {
+            ctx.theme_watcher.replace(Some(debouncer));
+            let ctx = ctx.clone();
+            glib::spawn_future_local(async move {
+                while rx.recv().await.is_ok() {
+                    retheme(&ctx);
+                }
+            });
+        }
+    } else if !ctx.palette.borrow().from_file && libadwaita::is_initialized() {
+        // off Omarchy the light/dark bit is all there is
+        let ctx = ctx.clone();
+        libadwaita::StyleManager::default().connect_dark_notify(move |_| retheme(&ctx));
+    }
+}
+
+/// Re-derive and push through evaluate_javascript, updating :root custom
+/// properties in place. Never reload — rethemeing is exactly when the user
+/// is mid-document (§6.3).
+fn retheme(ctx: &Rc<WindowCtx>) {
+    let new = theme::Palette::load(adw_dark_hint);
+    if let Ok(bg) = new.get("background").parse::<gdk::RGBA>() {
+        ctx.webview.set_background_color(&bg);
+    }
+    apply_chrome_css(&new);
+    let js = format!(
+        "applyPalette({}, {}, {});",
+        new.css_vars_json(16),
+        new.mermaid_vars_json(),
+        html::json_str(if new.dark { "dark" } else { "light" }),
+    );
+    ctx.webview
+        .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+    *ctx.palette.borrow_mut() = new;
+}
+
+fn parse_headings_message(s: &str) -> Option<Vec<headings::Heading>> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    let hs = v.get("headings")?.as_array()?;
+    Some(
+        hs.iter()
+            .filter_map(|h| {
+                Some(headings::Heading {
+                    level: h.get("level")?.as_u64()? as u8,
+                    text: h.get("text")?.as_str()?.to_string(),
+                    id: h.get("id")?.as_str()?.to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
 fn scroll_to_anchor(ctx: &Rc<WindowCtx>, id: &str) {
     // Clearing first makes a repeat click on the same heading jump again.
     let js = format!(
@@ -468,8 +607,23 @@ fn scroll_to_anchor(ctx: &Rc<WindowCtx>, id: &str) {
         .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
 }
 
+thread_local! {
+    static CHROME_CSS: gtk4::CssProvider = {
+        let provider = gtk4::CssProvider::new();
+        if let Some(display) = gdk::Display::default() {
+            gtk4::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+        provider
+    };
+}
+
 /// Style the little GTK chrome there is (the Navigator) from the same
-/// palette as the document, with the body face (§6.3, §6.4).
+/// palette as the document, with the body face (§6.3, §6.4). One provider,
+/// reloaded in place on retheme.
 fn apply_chrome_css(palette: &theme::Palette) {
     let css = format!(
         r#"
@@ -499,20 +653,14 @@ paned > separator {{ background-color: {muted}; min-width: 1px; }}
             palette.get("darker_background")
         },
     );
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_string(&css);
-    if let Some(display) = gdk::Display::default() {
-        gtk4::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
+    CHROME_CSS.with(|provider| provider.load_from_string(&css));
 }
 
 /// Directory view: the auto-index page (§8 empty states included).
 fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
     ctx.pending_anchor.replace(None);
+    // a directory listing is not a watched document
+    ctx.doc_watcher.replace(None);
     let mut entries = Vec::new();
     if let Ok(read) = std::fs::read_dir(dir) {
         for entry in read.flatten() {
@@ -551,7 +699,7 @@ fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
     let parent_href = dir.parent().map(doc_uri);
     let page = html::auto_index_page(
         &ctx.web_dir,
-        &ctx.palette,
+        &ctx.palette.borrow(),
         &title,
         &entries,
         parent_href.as_deref(),
@@ -661,13 +809,13 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
     let page = if langmap::is_markdown(&file_name) {
         html::markdown_page(
             &ctx.web_dir,
-            &ctx.palette,
+            &ctx.palette.borrow(),
             &file_name,
             &content,
             ctx.force_full.get(),
         )
     } else {
-        html::code_page(&ctx.web_dir, &ctx.palette, &file_name, &content)
+        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &file_name, &content)
     };
 
     let dir = path.parent().unwrap_or_else(|| Path::new("/"));
@@ -676,6 +824,7 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some(&format!("{file_name} — Moremaid")));
     ctx.webview.load_html(&page, Some(&base));
+    arm_doc_watcher(ctx);
     true
 }
 
@@ -684,7 +833,7 @@ fn load_stdin(ctx: &Rc<WindowCtx>, src: String) {
     // the command ran (§8). No live reload — there is nothing to watch.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let base = doc_base_uri(&cwd);
-    let page = html::markdown_page(&ctx.web_dir, &ctx.palette, "(stdin)", &src, ctx.force_full.get());
+    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), "(stdin)", &src, ctx.force_full.get());
     ctx.stdin_src.replace(Some(src));
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some("(stdin) — Moremaid"));
@@ -787,7 +936,7 @@ fn spawn_window_for(path: &Path) {
 
 fn open_diagram_window(app: &gtk4::Application, ctx: &Rc<WindowCtx>, definition: &str) {
     let webview = webkit6::WebView::new();
-    if let Ok(bg) = ctx.palette.get("background").parse::<gdk::RGBA>() {
+    if let Ok(bg) = ctx.palette.borrow().get("background").parse::<gdk::RGBA>() {
         webview.set_background_color(&bg);
     }
     // Under a tiler this window will tile; the README documents a float rule
@@ -799,7 +948,7 @@ fn open_diagram_window(app: &gtk4::Application, ctx: &Rc<WindowCtx>, definition:
         .title("Mermaid Diagram — Moremaid")
         .child(&webview)
         .build();
-    let page = html::diagram_page(&ctx.palette, definition);
+    let page = html::diagram_page(&ctx.palette.borrow(), definition);
     webview.load_html(&page, Some("moremaid://assets/"));
     window.present();
 }
@@ -849,6 +998,9 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
             overlay.open(overlay::Mode::Content);
         }
     });
+    let show_shortcuts = make("show-shortcuts", ctx, |c| {
+        show_shortcuts_dialog(&c.window);
+    });
     let new_window = make("new-window", ctx, |c| {
         let target = c
             .root_dir
@@ -862,7 +1014,7 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
 
     for a in [
         &zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar,
-        &quick_open, &find_in_files, &new_window,
+        &quick_open, &find_in_files, &new_window, &show_shortcuts,
     ] {
         ctx.window.add_action(a);
     }
@@ -875,4 +1027,7 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     app.set_accels_for_action("win.quick-open", &["<Control>p"]);
     app.set_accels_for_action("win.find-in-files", &["<Control><Shift>f"]);
     app.set_accels_for_action("win.new-window", &["<Control>n"]);
+    // `?` (in the vim-key controller) is the canonical binding; F1 is the
+    // conventional fallback and works even where bare keys are consumed.
+    app.set_accels_for_action("win.show-shortcuts", &["F1"]);
 }

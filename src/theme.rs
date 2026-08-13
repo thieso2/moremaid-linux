@@ -50,6 +50,9 @@ const FALLBACK_LIGHT: &[(&str, &str)] = &[
 #[derive(Clone)]
 pub struct Palette {
     pub dark: bool,
+    /// true when read from colors.toml — false means built-in fallback,
+    /// in which case the AdwStyleManager light/dark bit drives rethemes
+    pub from_file: bool,
     map: HashMap<String, String>,
 }
 
@@ -82,6 +85,7 @@ impl Palette {
         let base = if dark { FALLBACK_DARK } else { FALLBACK_LIGHT };
         Palette {
             dark,
+            from_file: false,
             map: base.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         }
     }
@@ -93,6 +97,7 @@ impl Palette {
             .map(|m| m != "light")
             .unwrap_or(true);
         let mut palette = Self::fallback(dark);
+        palette.from_file = true;
         for key in PALETTE_KEYS {
             if let Some(value) = table.get(*key).and_then(|v| v.as_str()) {
                 if parse_hex(value).is_some() {
@@ -119,84 +124,82 @@ impl Palette {
         }
     }
 
+    /// Every CSS custom property the rendering layer consumes, as data —
+    /// the `:root` block and the live-retheme JSON both derive from this
+    /// one list so they can never drift apart.
+    pub fn css_vars(&self, font_size_px: u32) -> Vec<(&'static str, String)> {
+        let accent = self.get("accent").to_string();
+        let raised = self.raised().to_string();
+        let dim_fg = self.get("dark_foreground").to_string();
+        let red = self.get("red").to_string();
+        let (r, g, b) = parse_hex(self.get("background")).unwrap_or((0, 0, 0));
+        vec![
+            ("--font-body", FONT_BODY.to_string()),
+            ("--font-heading", FONT_BODY.to_string()),
+            ("--font-code", FONT_CODE.to_string()),
+            ("--font-size-base", format!("{font_size_px}px")),
+            ("--line-height", "1.6".into()),
+            ("--paragraph-spacing", "1em".into()),
+            ("--max-width", "800px".into()),
+            ("--text-align", "left".into()),
+            ("--bg-color", self.get("background").into()),
+            ("--bg-color-rgb", format!("{r}, {g}, {b}")),
+            ("--text-color", self.get("foreground").into()),
+            ("--heading-color", self.get("bright_foreground").into()),
+            ("--heading2-color", self.get("light_foreground").into()),
+            ("--border-color", self.get("muted").into()),
+            ("--code-bg", raised.clone()),
+            ("--code-color", red.clone()),
+            ("--link-color", accent.clone()),
+            ("--accent-color", accent.clone()),
+            ("--accent-dim", with_alpha(&accent, 0x66)),
+            ("--selection-color", self.get("selection").into()),
+            ("--blockquote-color", dim_fg.clone()),
+            ("--table-header-bg", raised.clone()),
+            ("--table-border", self.get("muted").into()),
+            ("--file-info-bg", raised),
+            ("--file-info-color", dim_fg.clone()),
+            ("--secondary-text", dim_fg),
+            ("--error-color", red.clone()),
+            ("--mermaid-btn-bg", with_alpha(&accent, 0xcc)),
+            ("--mermaid-btn-hover", accent),
+            ("--ansi-red", red),
+            ("--ansi-yellow", self.get("yellow").into()),
+            ("--ansi-orange", self.get("orange").into()),
+            ("--ansi-green", self.get("green").into()),
+            ("--ansi-cyan", self.get("cyan").into()),
+            ("--ansi-blue", self.get("blue").into()),
+            ("--ansi-magenta", self.get("magenta").into()),
+            ("--ansi-bright-red", self.get("bright_red").into()),
+            ("--ansi-bright-yellow", self.get("bright_yellow").into()),
+            ("--ansi-bright-green", self.get("bright_green").into()),
+            ("--ansi-bright-cyan", self.get("bright_cyan").into()),
+            ("--ansi-bright-blue", self.get("bright_blue").into()),
+            ("--ansi-bright-magenta", self.get("bright_magenta").into()),
+        ]
+    }
+
     /// The `:root` custom-property block interpolated into every page.
     pub fn css_block(&self, font_size_px: u32) -> String {
-        let accent = self.get("accent");
-        let raised = self.raised();
-        let (r, g, b) = parse_hex(self.get("background")).unwrap_or((0, 0, 0));
-        format!(
-            r#":root {{
-    --font-body: {font_body};
-    --font-heading: {font_body};
-    --font-code: {font_code};
-    --font-size-base: {font_size_px}px;
-    --line-height: 1.6;
-    --paragraph-spacing: 1em;
-    --max-width: 800px;
-    --text-align: left;
-    --bg-color: {bg};
-    --bg-color-rgb: {r}, {g}, {b};
-    --text-color: {fg};
-    --heading-color: {heading};
-    --heading2-color: {heading2};
-    --border-color: {muted};
-    --code-bg: {raised};
-    --code-color: {red};
-    --link-color: {accent};
-    --accent-color: {accent};
-    --accent-dim: {accent_dim};
-    --selection-color: {selection};
-    --blockquote-color: {dim_fg};
-    --table-header-bg: {raised};
-    --table-border: {muted};
-    --file-info-bg: {raised};
-    --file-info-color: {dim_fg};
-    --secondary-text: {dim_fg};
-    --error-color: {red};
-    --mermaid-btn-bg: {accent_btn};
-    --mermaid-btn-hover: {accent};
-    --ansi-red: {red};
-    --ansi-yellow: {yellow};
-    --ansi-orange: {orange};
-    --ansi-green: {green};
-    --ansi-cyan: {cyan};
-    --ansi-blue: {blue};
-    --ansi-magenta: {magenta};
-    --ansi-bright-red: {bright_red};
-    --ansi-bright-yellow: {bright_yellow};
-    --ansi-bright-green: {bright_green};
-    --ansi-bright-cyan: {bright_cyan};
-    --ansi-bright-blue: {bright_blue};
-    --ansi-bright-magenta: {bright_magenta};
-}}
-"#,
-            font_body = FONT_BODY,
-            font_code = FONT_CODE,
-            bg = self.get("background"),
-            fg = self.get("foreground"),
-            heading = self.get("bright_foreground"),
-            heading2 = self.get("light_foreground"),
-            muted = self.get("muted"),
-            raised = raised,
-            red = self.get("red"),
-            accent = accent,
-            accent_dim = with_alpha(accent, 0x66),
-            accent_btn = with_alpha(accent, 0xcc),
-            selection = self.get("selection"),
-            dim_fg = self.get("dark_foreground"),
-            yellow = self.get("yellow"),
-            orange = self.get("orange"),
-            green = self.get("green"),
-            cyan = self.get("cyan"),
-            blue = self.get("blue"),
-            magenta = self.get("magenta"),
-            bright_red = self.get("bright_red"),
-            bright_yellow = self.get("bright_yellow"),
-            bright_green = self.get("bright_green"),
-            bright_cyan = self.get("bright_cyan"),
-            bright_blue = self.get("bright_blue"),
-            bright_magenta = self.get("bright_magenta"),
-        )
+        let mut out = String::from(":root {\n");
+        for (name, value) in self.css_vars(font_size_px) {
+            out.push_str(&format!("    {name}: {value};\n"));
+        }
+        out.push_str("}\n");
+        out
+    }
+
+    /// The same variables as a JSON object for `applyPalette` (§6.3: on
+    /// theme change, update `:root` in place — never reload the page).
+    pub fn css_vars_json(&self, font_size_px: u32) -> String {
+        let body: Vec<String> = self
+            .css_vars(font_size_px)
+            .iter()
+            .map(|(name, value)| {
+                format!("{}: {}", crate::html::json_str(name), crate::html::json_str(value))
+            })
+            .collect();
+        format!("{{{}}}", body.join(", "))
     }
 
     /// Mermaid theme variables (theme 'base') derived from the same roles, so
@@ -271,5 +274,26 @@ mod tests {
     #[test]
     fn alpha_suffix() {
         assert_eq!(with_alpha("#7aa2f7", 0x66), "#7aa2f766");
+    }
+
+    #[test]
+    fn css_block_and_json_stay_in_sync() {
+        let p = Palette::fallback(true);
+        let block = p.css_block(16);
+        let json = p.css_vars_json(16);
+        for (name, value) in p.css_vars(16) {
+            assert!(block.contains(&format!("{name}: {value};")), "{name} missing from block");
+            assert!(json.contains(&format!("\"{name}\"")), "{name} missing from json");
+        }
+        // json must be object-shaped and script-safe
+        assert!(json.starts_with('{') && json.ends_with('}'));
+        assert!(!json.contains("</"));
+    }
+
+    #[test]
+    fn from_file_flag() {
+        assert!(!Palette::fallback(true).from_file);
+        let table: toml::Table = "mode = \"dark\"".parse().unwrap();
+        assert!(Palette::from_table(&table).from_file);
     }
 }

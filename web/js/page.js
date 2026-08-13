@@ -67,19 +67,44 @@ function initializeMermaid(vars) {
 }
 
 /* Palette hot-swap (§6.3): update :root custom properties in place, re-init
- * Mermaid, drop the diagram cache and recolour diagrams. Never reloads. */
-async function applyPalette(cssVars, mermaidVars) {
+ * Mermaid and recolour the diagrams where they stand. Never reloads, never
+ * rebuilds the document — a theme switch must not move the scroll position. */
+async function applyPalette(cssVars, mermaidVars, mode) {
     var root = document.documentElement;
     for (var k in cssVars) root.style.setProperty(k, cssVars[k]);
+    if (mode) root.setAttribute('data-theme', mode);
+    __MOREMAID__.mermaidVars = mermaidVars;
     if (typeof mermaid !== 'undefined') {
-        __MOREMAID__.mermaidVars = mermaidVars;
         initializeMermaid(mermaidVars);
         __diagramCache.clear();
         var contentDiv = document.getElementById('content');
-        if (contentDiv && typeof rawMarkdown !== 'undefined') {
-            await reRenderMarkdown(rawMarkdown);
+        if (contentDiv) {
+            await renderDiagrams(contentDiv);
         }
     }
+}
+
+/* ---------------------------------------------------------------- live banner (§8) */
+
+function moremaidShowBanner(text) {
+    moremaidClearBanner();
+    var banner = document.createElement('div');
+    banner.className = 'moremaid-banner';
+    banner.id = 'moremaid-live-banner';
+    var label = document.createElement('span');
+    label.textContent = text;
+    banner.appendChild(label);
+    var dismiss = document.createElement('button');
+    dismiss.className = 'moremaid-banner-dismiss';
+    dismiss.textContent = '✕';
+    dismiss.onclick = function() { moremaidClearBanner(); };
+    banner.appendChild(dismiss);
+    document.body.insertBefore(banner, document.body.firstChild);
+}
+
+function moremaidClearBanner() {
+    var banner = document.getElementById('moremaid-live-banner');
+    if (banner) banner.remove();
 }
 
 /* ---------------------------------------------------------------- Mermaid fullscreen */
@@ -211,13 +236,19 @@ async function renderDiagrams(container) {
     var diagrams = container.querySelectorAll('.mermaid');
     for (var i = 0; i < diagrams.length; i++) {
         var diagram = diagrams[i];
-        var graphDefinition = diagram.textContent;
+        // freshly-rendered markdown carries the source as textContent; an
+        // already-rendered diagram (palette hot-swap) keeps it in data-src
+        var graphDefinition = diagram.dataset.src || diagram.textContent;
+        diagram.dataset.src = graphDefinition;
         var svg = __diagramCache.get(graphDefinition);
         if (svg === undefined) {
             try {
                 var result = await mermaid.render('mermaid-' + (++__diagramSeq), graphDefinition);
                 svg = result.svg;
                 __diagramCache.set(graphDefinition, svg);
+                // the M4 invariant is checked against this line: a
+                // prose-only edit must log zero of these (§9.2)
+                console.log('[moremaid] diagram rendered (cache miss)');
             } catch (error) {
                 console.error('Error rendering mermaid diagram:', error);
                 diagram.innerHTML = '';

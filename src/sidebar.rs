@@ -29,6 +29,9 @@ struct Inner {
     root: PathBuf,
     // relative dir → its children store; "" is the tree root
     stores: RefCell<HashMap<PathBuf, gio::ListStore>>,
+    // absolute file path → its (materialized) headings store, so live
+    // reload can replace the rows in place
+    heading_stores: RefCell<HashMap<PathBuf, gio::ListStore>>,
 }
 
 pub struct Sidebar {
@@ -41,6 +44,7 @@ impl Sidebar {
         let inner = Rc::new(Inner {
             root: root_dir.to_path_buf(),
             stores: RefCell::new(HashMap::new()),
+            heading_stores: RefCell::new(HashMap::new()),
         });
 
         let root_store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -152,6 +156,15 @@ impl Sidebar {
         Sidebar { widget, inner }
     }
 
+    /// Replace a file's heading rows after a live reload changed them.
+    /// A no-op until the file's headings were materialized by expansion.
+    pub fn update_headings(&self, file: &Path, hs: Vec<headings::Heading>) {
+        if let Some(store) = self.inner.heading_stores.borrow().get(file) {
+            store.remove_all();
+            fill_heading_store(store, file, hs);
+        }
+    }
+
     /// Feed a batch of markdown paths (absolute, under the root) into the
     /// tree. Called on the main loop as scan batches stream in.
     pub fn add_files(&self, paths: &[PathBuf]) {
@@ -218,6 +231,18 @@ fn insert_sorted(store: &gio::ListStore, node: Node) {
     });
 }
 
+fn fill_heading_store(store: &gio::ListStore, file: &Path, hs: Vec<headings::Heading>) {
+    for h in hs {
+        // document order, not sorted
+        store.append(&glib::BoxedAnyObject::new(Node::Heading {
+            text: h.text,
+            id: h.id,
+            level: h.level,
+            file: file.to_path_buf(),
+        }));
+    }
+}
+
 fn rank(node: &Node) -> u8 {
     match node {
         Node::Folder { .. } => 0,
@@ -249,15 +274,11 @@ fn children_for(inner: &Rc<Inner>, item: &glib::Object) -> Option<gio::ListModel
                 return None;
             }
             let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-            for h in hs {
-                // document order, not sorted
-                store.append(&glib::BoxedAnyObject::new(Node::Heading {
-                    text: h.text,
-                    id: h.id,
-                    level: h.level,
-                    file: abs.clone(),
-                }));
-            }
+            fill_heading_store(&store, &abs, hs);
+            inner
+                .heading_stores
+                .borrow_mut()
+                .insert(abs, store.clone());
             Some(store.upcast())
         }
         Node::Heading { .. } => None,

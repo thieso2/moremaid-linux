@@ -338,6 +338,23 @@ img { max-width: 100%; height: auto; }
     margin: -30px -30px 20px -30px;
     font-size: 14px;
     color: var(--text-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.moremaid-banner-dismiss {
+    background: transparent;
+    color: var(--secondary-text);
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+}
+
+.moremaid-banner-dismiss:hover {
+    color: var(--text-color);
 }
 
 /* Print styles — force light colors so dark palettes don't produce invisible text */
