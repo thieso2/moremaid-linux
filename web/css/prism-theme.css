@@ -1,0 +1,118 @@
+/* Prism token colours fed from the Omarchy palette (HANDOFF §6.3 role contract).
+ * Replaces prism-tomorrow.min.css — prose, code and diagrams share one palette.
+ *
+ *   comment → dark_foreground   keyword → magenta    string → green
+ *   number  → orange            function → blue      class-name → yellow
+ *   constant/builtin → cyan     operator → foreground
+ *   deleted → red               inserted → green     bright_* for emphasis
+ */
+
+code[class*="language-"],
+pre[class*="language-"] {
+    color: var(--text-color);
+    background: none;
+    text-shadow: none;
+    text-align: left;
+    white-space: pre;
+    word-spacing: normal;
+    word-break: normal;
+    word-wrap: normal;
+    tab-size: 4;
+    hyphens: none;
+}
+
+pre[class*="language-"] {
+    overflow: auto;
+    background: var(--code-bg);
+}
+
+:not(pre) > code[class*="language-"] {
+    background: var(--code-bg);
+    padding: 2px 5px;
+    border-radius: 3px;
+    white-space: normal;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+    color: var(--secondary-text);
+    font-style: italic;
+}
+
+.token.punctuation {
+    color: var(--text-color);
+}
+
+.token.keyword,
+.token.atrule,
+.token.rule {
+    color: var(--ansi-magenta);
+}
+
+.token.string,
+.token.char,
+.token.attr-value,
+.token.inserted {
+    color: var(--ansi-green);
+}
+
+.token.number {
+    color: var(--ansi-orange);
+}
+
+.token.function {
+    color: var(--ansi-blue);
+}
+
+.token.class-name,
+.token.maybe-class-name,
+.token.namespace {
+    color: var(--ansi-yellow);
+}
+
+.token.constant,
+.token.builtin,
+.token.boolean,
+.token.symbol {
+    color: var(--ansi-cyan);
+}
+
+.token.operator,
+.token.entity {
+    color: var(--text-color);
+}
+
+.token.deleted {
+    color: var(--ansi-red);
+}
+
+.token.property,
+.token.tag,
+.token.selector {
+    color: var(--ansi-blue);
+}
+
+.token.attr-name,
+.token.variable {
+    color: var(--ansi-bright-yellow);
+}
+
+.token.regex,
+.token.url {
+    color: var(--ansi-bright-cyan);
+}
+
+.token.important {
+    color: var(--ansi-bright-red);
+}
+
+.token.important,
+.token.bold {
+    font-weight: bold;
+}
+
+.token.italic {
+    font-style: italic;
+}

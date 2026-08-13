@@ -1,0 +1,29 @@
+[package]
+name = "moremaid"
+version = "0.1.0"
+edition = "2021"
+description = "A markdown reader with first-class Mermaid diagram support, for Omarchy/Hyprland"
+license = "MIT"
+
+[dependencies]
+gtk4           = { version = "0.11", features = ["v4_20"] }
+libadwaita     = { version = "0.9",  features = ["v1_8"] }
+webkit6        = "0.6"
+
+ignore         = "0.4"    # ripgrep's walker: directory scan + gitignore
+grep-searcher  = "0.1"    # in-process content search
+grep-regex     = "0.1"
+grep-matcher   = "0.1"    # match spans, for highlighting
+nucleo-matcher = "0.3"    # fuzzy matching for Quick Open
+
+notify                = "8"
+notify-debouncer-full = "0.7"
+
+serde = { version = "1", features = ["derive"] }
+toml  = "1"
+
+open          = "5"
+async-channel = "2"
+
+[profile.release]
+lto = "thin"
