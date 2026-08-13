@@ -3,8 +3,11 @@
 //! One window per invocation, no in-app tabs, no session restore (§6.1).
 //! The compositor owns window management; the app renders documents.
 
+mod headings;
 mod html;
 mod langmap;
+mod scan;
+mod sidebar;
 mod theme;
 
 use gtk4::gdk;
@@ -22,6 +25,7 @@ const APP_ID: &str = "org.moremaid.Moremaid";
 
 enum Target {
     File(PathBuf),
+    Dir(PathBuf),
     Stdin(String),
 }
 
@@ -67,14 +71,12 @@ fn parse_target(args: &[String]) -> Result<Target, String> {
             if !path.exists() {
                 return Err(format!("{arg}: no such file or directory"));
             }
-            if path.is_dir() {
-                return Err(format!(
-                    "{arg} is a directory — directory browsing lands in Milestone 2"
-                ));
-            }
             let path = path
                 .canonicalize()
                 .map_err(|e| format!("{arg}: {e}"))?;
+            if path.is_dir() {
+                return Ok(Target::Dir(path));
+            }
             let data = std::fs::read(&path).map_err(|e| format!("{arg}: {e}"))?;
             if data[..data.len().min(8192)].contains(&0) {
                 return Err(format!(
@@ -87,7 +89,10 @@ fn parse_target(args: &[String]) -> Result<Target, String> {
         }
         None => {
             if std::io::stdin().is_terminal() {
-                Err("usage: moremaid <file>   (or pipe markdown on stdin)".into())
+                // bare `moremaid` browses the current directory (§10)
+                std::env::current_dir()
+                    .map_err(|e| format!("current directory: {e}"))
+                    .map(Target::Dir)
             } else {
                 let mut buf = String::new();
                 std::io::stdin()
@@ -108,6 +113,9 @@ struct WindowCtx {
     stdin_src: RefCell<Option<String>>,
     base_uri: RefCell<String>,
     force_full: Cell<bool>,
+    /// anchor to jump to once the pending document finishes loading
+    pending_anchor: RefCell<Option<String>>,
+    sidebar: RefCell<Option<Rc<sidebar::Sidebar>>>,
 }
 
 fn trace(started: Instant, what: &str) {
@@ -152,7 +160,6 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         .application(app)
         .default_width(1100)
         .default_height(800)
-        .child(&webview)
         .build();
 
     let ctx = Rc::new(WindowCtx {
@@ -164,12 +171,14 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         stdin_src: RefCell::new(None),
         base_uri: RefCell::new(String::new()),
         force_full: Cell::new(false),
+        pending_anchor: RefCell::new(None),
+        sidebar: RefCell::new(None),
     });
 
     // JS → Rust bridge. Payloads are JSON strings (or, for openDiagram, the
     // raw diagram definition) — see web/js/page.js.
     {
-        let started = started;
+        let ctx = ctx.clone();
         ucm.connect_script_message_received(Some("moremaid"), move |_, value| {
             let Some(s) = value.to_str().into() else { return };
             let s: String = s.to_string();
@@ -186,7 +195,13 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                     );
                 }
             }
-            // headings arrive here too — consumed by the Navigator in M2.
+            if s.starts_with("{\"type\":\"loadComplete\"") {
+                if let Some(anchor) = ctx.pending_anchor.borrow_mut().take() {
+                    scroll_to_anchor(&ctx, &anchor);
+                }
+            }
+            // headings from the live document arrive here too — the sidebar
+            // parses files itself, so they are unused for now (M4 revisits).
         });
     }
     {
@@ -200,10 +215,8 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
 
     connect_link_policy(&ctx, app);
     install_actions(app, &ctx);
-    trace(started, "webview + window built");
 
     {
-        let started = started;
         webview.connect_load_changed(move |_, event| {
             if event == webkit6::LoadEvent::Finished {
                 trace(started, "webkit load finished");
@@ -212,12 +225,165 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
     }
 
     match target {
-        Target::File(path) => load_path(&ctx, &path),
-        Target::Stdin(src) => load_stdin(&ctx, src),
+        Target::File(path) => {
+            window.set_child(Some(&webview));
+            load_path(&ctx, &path);
+        }
+        Target::Stdin(src) => {
+            window.set_child(Some(&webview));
+            load_stdin(&ctx, src);
+        }
+        Target::Dir(dir) => {
+            apply_chrome_css(&ctx.palette);
+            let sb = {
+                let ctx = ctx.clone();
+                Rc::new(sidebar::Sidebar::new(&dir, move |action| match action {
+                    sidebar::SidebarAction::OpenFile(path) => {
+                        load_path(&ctx, &path);
+                    }
+                    sidebar::SidebarAction::ScrollTo { file, id } => {
+                        if ctx.doc_path.borrow().as_deref() == Some(file.as_path()) {
+                            scroll_to_anchor(&ctx, &id);
+                        } else if load_path(&ctx, &file) {
+                            // set only after the load was issued — a failed
+                            // load must not leave a stale anchor for the next
+                            // unrelated page's loadComplete to consume
+                            ctx.pending_anchor.replace(Some(id));
+                        }
+                    }
+                }))
+            };
+            let paned = gtk4::Paned::builder()
+                .orientation(gtk4::Orientation::Horizontal)
+                .start_child(&sb.widget)
+                .end_child(&webview)
+                .position(280)
+                .shrink_start_child(false)
+                .resize_start_child(false)
+                .build();
+            window.set_child(Some(&paned));
+            ctx.sidebar.replace(Some(sb.clone()));
+
+            load_auto_index(&ctx, &dir);
+
+            // Stream the scan into the Navigator (§9.1: first rows early).
+            let rx = scan::scan_markdown(&dir);
+            glib::spawn_future_local(async move {
+                let mut first = true;
+                let mut total = 0usize;
+                while let Ok(batch) = rx.recv().await {
+                    total += batch.len();
+                    sb.add_files(&batch);
+                    if first {
+                        trace(started, "scan first rows");
+                        first = false;
+                    }
+                }
+                trace(started, &format!("scan complete ({total} markdown files)"));
+            });
+        }
     }
     trace(started, "load_html issued");
 
     window.present();
+}
+
+fn scroll_to_anchor(ctx: &Rc<WindowCtx>, id: &str) {
+    // Clearing first makes a repeat click on the same heading jump again.
+    let js = format!(
+        "location.hash = ''; location.hash = '#' + {};",
+        html::json_str(id)
+    );
+    ctx.webview
+        .evaluate_javascript(&js, None, None, None::<&gio::Cancellable>, |_| {});
+}
+
+/// Style the little GTK chrome there is (the Navigator) from the same
+/// palette as the document, with the body face (§6.3, §6.4).
+fn apply_chrome_css(palette: &theme::Palette) {
+    let css = format!(
+        r#"
+window {{ background-color: {bg}; color: {fg}; }}
+.moremaid-sidebar {{ background-color: {bg}; color: {fg}; font-family: "iA Writer Quattro S", "Noto Sans", sans-serif; }}
+.moremaid-sidebar listview, .moremaid-sidebar listview row {{ background: transparent; }}
+.moremaid-sidebar listview row:selected {{ background-color: {selection}; }}
+.moremaid-sidebar listview row:hover {{ background-color: {selection}; }}
+.moremaid-heading-row {{ color: {dim}; font-size: 90%; }}
+paned > separator {{ background-color: {muted}; min-width: 1px; }}
+"#,
+        bg = palette.get("background"),
+        fg = palette.get("foreground"),
+        selection = palette.get("selection"),
+        dim = palette.get("dark_foreground"),
+        muted = palette.get("muted"),
+    );
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(&css);
+    if let Some(display) = gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+/// Directory view: the auto-index page (§8 empty states included).
+fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
+    ctx.pending_anchor.replace(None);
+    let mut entries = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let is_dir = meta.is_dir();
+            if !is_dir && !langmap::is_markdown(&name) {
+                continue;
+            }
+            let modified_epoch = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            entries.push(html::IndexEntry {
+                href: doc_uri(&entry.path()),
+                name,
+                is_dir,
+                size: meta.len(),
+                modified_epoch,
+            });
+        }
+    }
+    // Newest first — the same default setupAutoIndexSort applies, so the
+    // table doesn't visibly reshuffle a frame after first paint.
+    entries.sort_by_key(|e| std::cmp::Reverse(e.modified_epoch));
+
+    let title = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| dir.display().to_string());
+    let parent_href = dir.parent().map(doc_uri);
+    let page = html::auto_index_page(
+        &ctx.web_dir,
+        &ctx.palette,
+        &title,
+        &entries,
+        parent_href.as_deref(),
+    );
+    let base = doc_base_uri(dir);
+    ctx.doc_path.replace(None);
+    ctx.base_uri.replace(base.clone());
+    ctx.window.set_title(Some(&format!("{title} — Moremaid")));
+    ctx.webview.load_html(&page, Some(&base));
+}
+
+fn doc_uri(path: &Path) -> String {
+    let escaped = glib::Uri::escape_string(&path.to_string_lossy(), Some("/"), true);
+    format!("moremaid://doc{escaped}")
 }
 
 fn adw_dark_hint() -> bool {
@@ -295,7 +461,9 @@ fn finish_not_found(request: &webkit6::URISchemeRequest, uri: &str) {
     ));
 }
 
-fn load_path(ctx: &Rc<WindowCtx>, path: &Path) {
+fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
+    // any navigation supersedes a pending heading jump
+    ctx.pending_anchor.replace(None);
     let file_name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -304,7 +472,7 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("moremaid: {}: {e}", path.display());
-            return;
+            return false;
         }
     };
 
@@ -326,6 +494,7 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) {
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some(&format!("{file_name} — Moremaid")));
     ctx.webview.load_html(&page, Some(&base));
+    true
 }
 
 fn load_stdin(ctx: &Rc<WindowCtx>, src: String) {
@@ -388,6 +557,11 @@ fn connect_link_policy(ctx: &Rc<WindowCtx>, _app: &gtk4::Application) {
             let path = glib::Uri::unescape_string(without_fragment, None)
                 .map(|g| PathBuf::from(g.to_string()))
                 .unwrap_or_else(|| PathBuf::from(without_fragment));
+            if path.is_dir() {
+                decision.ignore();
+                load_auto_index(&ctx, &path);
+                return true;
+            }
             if path.is_file() && is_text_file(&path) {
                 decision.ignore();
                 // Rust wart (§5): modifiers() is a bare u32, not a typed
@@ -478,7 +652,13 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
         }
     });
 
-    for a in [&zoom_in, &zoom_out, &zoom_reset, &force_render] {
+    let toggle_sidebar = make("toggle-sidebar", ctx, |c| {
+        if let Some(sb) = &*c.sidebar.borrow() {
+            sb.widget.set_visible(!sb.widget.is_visible());
+        }
+    });
+
+    for a in [&zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar] {
         ctx.window.add_action(a);
     }
     // Ctrl for the app; Super is the compositor's and must never be bound (§6.5).
@@ -486,4 +666,5 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     app.set_accels_for_action("win.zoom-out", &["<Control>minus", "<Control>KP_Subtract"]);
     app.set_accels_for_action("win.zoom-reset", &["<Control>0", "<Control>KP_0"]);
     app.set_accels_for_action("win.force-render", &["<Control><Shift>r"]);
+    app.set_accels_for_action("win.toggle-sidebar", &["<Control>b"]);
 }

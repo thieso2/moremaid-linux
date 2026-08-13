@@ -5,6 +5,7 @@
 //! (§9.5). Skeleton ported from HTMLGenerator.swift @ a3ab7fd.
 
 use crate::theme::Palette;
+use gtk4::glib;
 use std::path::{Path, PathBuf};
 
 /// Above these, render plain (no Mermaid, no Prism) behind a banner (§8).
@@ -23,17 +24,14 @@ pub fn web_dir() -> Option<PathBuf> {
     let xdg_data = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".local/share"));
-    for candidate in [
+    [
         xdg_data.join("moremaid/web"),
         PathBuf::from("/usr/share/moremaid/web"),
         // dev builds: the repo's web/ next to Cargo.toml
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web"),
-    ] {
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
 }
 
 fn asset(web: &Path, rel: &str) -> String {
@@ -175,6 +173,102 @@ var documentTitle = {title_json};
         title_json = json_str(file_name),
         page_js = asset(web, "js/page.js"),
     )
+}
+
+pub struct IndexEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_epoch: i64,
+    pub href: String,
+}
+
+/// Directory listing shown when a directory is opened — the auto-index page.
+/// Table markup matches what setupAutoIndexSort in page.js expects.
+pub fn auto_index_page(
+    web: &Path,
+    palette: &Palette,
+    title: &str,
+    entries: &[IndexEntry],
+    parent_href: Option<&str>,
+) -> String {
+    let body = if entries.is_empty() {
+        // Empty states get a message, never a blank window (§8).
+        r#"<p class="file-info">No markdown files here.</p>"#.to_string()
+    } else {
+        let rows: String = entries
+            .iter()
+            .map(|e| {
+                let display_name = if e.is_dir {
+                    format!("{}/", e.name)
+                } else {
+                    e.name.clone()
+                };
+                let size_cell = if e.is_dir {
+                    String::new()
+                } else {
+                    human_size(e.size)
+                };
+                let date_cell = glib::DateTime::from_unix_local(e.modified_epoch)
+                    .ok()
+                    .and_then(|d| d.format("%Y-%m-%d %H:%M").ok())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                format!(
+                    r#"<tr data-name="{name}" data-size="{size}" data-date="{date}"><td><a href="{href}">{display}</a></td><td class="ai-size">{size_cell}</td><td class="ai-date">{date_cell}</td></tr>"#,
+                    name = html_escape(&e.name),
+                    // directories sort together under the Size column
+                    // instead of interleaving at their inode size
+                    size = if e.is_dir { 0 } else { e.size },
+                    date = e.modified_epoch,
+                    href = html_escape(&e.href),
+                    display = html_escape(&display_name),
+                )
+            })
+            .collect();
+        format!(
+            r#"<table class="auto-index">
+<thead><tr><th class="ai-sortable" data-sort="name">Name</th><th class="ai-sortable" data-sort="size">Size</th><th class="ai-sortable" data-sort="modified">Modified</th></tr></thead>
+<tbody>{rows}</tbody>
+</table>"#
+        )
+    };
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en" data-theme="{mode}">
+<head>
+    {head}
+</head>
+<body>
+    <div class="container">{nav}<h1>{title_h}</h1>{body}</div>
+    <script>
+var __MOREMAID__ = {{ mermaidVars: {mermaid_vars}, plain: false }};
+var documentTitle = {title_json};
+{page_js}
+    </script>
+</body>
+</html>"#,
+        mode = if palette.dark { "dark" } else { "light" },
+        head = head_common(web, palette, title),
+        // lives outside the sortable table so it can't be re-ordered away
+        nav = parent_href
+            .map(|href| format!(r#"<div class="nav-bar"><a href="{}">&uarr; ..</a></div>"#, html_escape(href)))
+            .unwrap_or_default(),
+        title_h = html_escape(title),
+        mermaid_vars = palette.mermaid_vars_json(),
+        title_json = json_str(title),
+        page_js = asset(web, "js/page.js"),
+    )
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// The standalone diagram viewer (zoom dropdown, Ctrl +/− zoom, pan).

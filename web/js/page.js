@@ -286,12 +286,15 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (typeof rawMarkdown !== 'undefined' && document.getElementById('content')) {
         await renderDocument(rawMarkdown);
     } else {
-        // Code page: content is server-rendered <pre><code>; paint stands,
-        // highlighting arrives when Prism does.
+        // Code and auto-index pages: content is server-rendered; paint
+        // stands, highlighting arrives when Prism does.
         postToHost({ type: 'firstRender' });
-        ensurePrism().then(function() {
-            try { Prism.highlightAll(); addCopyButtons(); } catch(e) { console.error('Prism error:', e); }
-        }).catch(function(e) { console.error(e); });
+        if (typeof setupAutoIndexSort === 'function') setupAutoIndexSort();
+        if (document.querySelector('pre code')) {
+            ensurePrism().then(function() {
+                try { Prism.highlightAll(); addCopyButtons(); } catch(e) { console.error('Prism error:', e); }
+            }).catch(function(e) { console.error(e); });
+        }
     }
     postToHost({ type: 'loadComplete' });
 });

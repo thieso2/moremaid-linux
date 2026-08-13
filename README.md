@@ -9,20 +9,30 @@ layer (CSS/JS in `web/`) is extracted from the macOS app at pinned commit
 `a3ab7fd` and adapted; vendored web dependencies and their exact pins are
 recorded in `web/vendor/VERSIONS.md`.
 
-**Status: Milestone 1** — it opens a file. Directory browsing, the Navigator,
-Quick Open, Find in Files, and live reload land in Milestones 2–4.
+**Status: Milestone 2** — it opens files and browses directories. Quick Open,
+Find in Files, the `?` shortcuts overlay, and live reload land in
+Milestones 3–4.
 
 ## Running
 
 ```bash
 moremaid README.md            # open a markdown file
+moremaid docs/                # browse a directory (Navigator + index page)
+moremaid                      # browse the current directory
 moremaid src/main.rs          # any text file renders as highlighted code
 cat notes.md | moremaid       # stdin; relative links resolve from the CWD
 ```
 
-Keyboard: `Ctrl` `+` / `-` / `0` zoom, `Ctrl+Shift+R` force full render of a
-large document. `Ctrl+click` / middle-click / `Shift+click` on an internal
-link opens it in a new window.
+Directory mode scans recursively, respecting `.gitignore` (also outside git
+repositories) and skipping `.git`/`node_modules`. The Navigator lists
+folders, markdown files, and the headings inside each file — click a heading
+to jump to it. Heading anchors are guaranteed to match the rendered page:
+a shared fixture (`tests/fixtures/slugs.json`) pins the slug algorithm on
+both the Rust and JavaScript side.
+
+Keyboard: `Ctrl+B` toggle the Navigator, `Ctrl` `+` / `-` / `0` zoom,
+`Ctrl+Shift+R` force full render of a large document. `Ctrl+click` /
+middle-click / `Shift+click` on an internal link opens it in a new window.
 
 ## Theming
 

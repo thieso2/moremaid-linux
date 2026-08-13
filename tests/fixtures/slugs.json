@@ -1,0 +1,87 @@
+{
+  "_note": [
+    "Shared slug fixture (HANDOFF §9.3). Run by BOTH sides:",
+    "  - cargo test (src/headings.rs) — the Rust HeadingParser for the Navigator",
+    "  - node tests/slugs.test.js — the SHIPPED web/js/page.js pipeline (vendored markdown-it in a vm)",
+    "The two must produce identical ids or sidebar clicks resolve to anchors that don't exist.",
+    "skipTexts: the Rust parser keeps raw inline-HTML in display text where the DOM's textContent",
+    "would not; ids still must match. Setext (underline) headings are a known, deliberate gap in",
+    "the Rust parser — do not add them here."
+  ],
+  "documents": [
+    {
+      "name": "basics and duplicates",
+      "markdown": "# Title\n\n## Slugs\n\n### Slugs\n\n## Slugs\n",
+      "headings": [
+        { "level": 1, "text": "Title", "id": "title" },
+        { "level": 2, "text": "Slugs", "id": "slugs" },
+        { "level": 3, "text": "Slugs", "id": "slugs-1" },
+        { "level": 2, "text": "Slugs", "id": "slugs-2" }
+      ]
+    },
+    {
+      "name": "punctuation and unicode",
+      "markdown": "## What's new?!\n\n## Café & Straße\n\n## 🚀 Launch day\n\n## ???\n\n## !!!\n",
+      "headings": [
+        { "level": 2, "text": "What's new?!", "id": "whats-new" },
+        { "level": 2, "text": "Café & Straße", "id": "caf-strae" },
+        { "level": 2, "text": "🚀 Launch day", "id": "launch-day" },
+        { "level": 2, "text": "???", "id": "" },
+        { "level": 2, "text": "!!!", "id": "-1" }
+      ]
+    },
+    {
+      "name": "inline markup",
+      "markdown": "## The `slugify` function\n\n## See [Guide](docs/guide.md) here\n\n## ![icon](img/rocket.png) Assets\n\n## **Bold** and *emph* and ~~gone~~\n\n## Escaped \\*stars\\*\n\n## C#\n\n## Closing hashes ##\n",
+      "headings": [
+        { "level": 2, "text": "The slugify function", "id": "the-slugify-function" },
+        { "level": 2, "text": "See Guide here", "id": "see-guide-here" },
+        { "level": 2, "text": "Assets", "id": "icon-assets" },
+        { "level": 2, "text": "Bold and emph and gone", "id": "bold-and-emph-and-gone" },
+        { "level": 2, "text": "Escaped *stars*", "id": "escaped-stars" },
+        { "level": 2, "text": "C#", "id": "c" },
+        { "level": 2, "text": "Closing hashes", "id": "closing-hashes" }
+      ]
+    },
+    {
+      "name": "fences and fakes",
+      "markdown": "```bash\n# not a heading\n```\n\n~~~python\n## also not\n~~~\n\n    # indented code, not a heading\n\n   ### three spaces is fine\n\n###nospace\n\n####### seven hashes\n",
+      "headings": [
+        { "level": 3, "text": "three spaces is fine", "id": "three-spaces-is-fine" }
+      ]
+    },
+    {
+      "name": "inline html",
+      "skipTexts": true,
+      "markdown": "## a <em>b</em> c\n",
+      "headings": [
+        { "level": 2, "text": "a <em>b</em> c", "id": "a-embem-c" }
+      ]
+    },
+    {
+      "name": "autolink and underscores",
+      "markdown": "## Visit <https://x.dev> now\n\n## snake_case_name stays\n",
+      "headings": [
+        { "level": 2, "text": "Visit https://x.dev now", "id": "visit-httpsxdev-now" },
+        { "level": 2, "text": "snake_case_name stays", "id": "snake_case_name-stays" }
+      ]
+    },
+    {
+      "name": "reference links",
+      "markdown": "## See [the docs][ref] here\n\n## Also [broken][nope] link\n\n## Collapsed [target][] form\n\n[ref]: https://example.com\n[target]: https://example.org\n",
+      "headings": [
+        { "level": 2, "text": "See the docs here", "id": "see-the-docs-here" },
+        { "level": 2, "text": "Also [broken][nope] link", "id": "also-brokennope-link" },
+        { "level": 2, "text": "Collapsed target form", "id": "collapsed-target-form" }
+      ]
+    },
+    {
+      "name": "dashes collapse",
+      "markdown": "## a -- b\n\n##   leading and trailing   \n",
+      "headings": [
+        { "level": 2, "text": "a -- b", "id": "a-b" },
+        { "level": 2, "text": "leading and trailing", "id": "leading-and-trailing" }
+      ]
+    }
+  ]
+}
