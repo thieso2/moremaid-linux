@@ -314,9 +314,25 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
     install_actions(app, &ctx);
 
     {
+        let ctx = ctx.clone();
         webview.connect_load_changed(move |_, event| {
             if event == webkit6::LoadEvent::Finished {
                 trace(started, "webkit load finished");
+                // raw HTML documents carry no moremaid bridge, so their
+                // pending anchor resolves here instead of on loadComplete
+                let is_html_doc = ctx
+                    .doc_path
+                    .borrow()
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| langmap::is_html(&n.to_string_lossy()))
+                    .unwrap_or(false);
+                if is_html_doc && !ctx.view_source.get() {
+                    ctx.load_complete.set(true);
+                    if let Some(anchor) = ctx.pending_anchor.borrow_mut().take() {
+                        scroll_to_anchor(&ctx, &anchor);
+                    }
+                }
             }
         });
     }
@@ -600,6 +616,11 @@ fn refresh_doc(ctx: &Rc<WindowCtx>, path: &Path) {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
+    // a rendered HTML document has no re-render entry points — reload it
+    if langmap::is_html(&file_name) && !ctx.view_source.get() && path.exists() {
+        load_path(ctx, path);
+        return;
+    }
     let js = match std::fs::read_to_string(path) {
         Ok(content) => {
             if langmap::is_markdown(&file_name) && !ctx.view_source.get() {
@@ -961,7 +982,7 @@ fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
             }
             let Ok(meta) = entry.metadata() else { continue };
             let is_dir = meta.is_dir();
-            if !is_dir && !langmap::is_markdown(&name) {
+            if !is_dir && !langmap::is_markdown(&name) && !langmap::is_html(&name) {
                 continue;
             }
             let modified_epoch = meta
@@ -1112,6 +1133,13 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
             ctx.force_full.get(),
             ctx.load_seq.get(),
         )
+    } else if langmap::is_html(&file_name) && !ctx.view_source.get() {
+        // raw HTML renders as a document (§7 htmlPage) — the base URI makes
+        // its relative assets resolve over the scheme. These pages carry no
+        // moremaid bridge, so anchors resolve on LoadEvent::Finished instead
+        // of loadComplete. Like the macOS app, the document is trusted: it
+        // is the user's own file.
+        content
     } else {
         html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, &file_name, &content, ctx.load_seq.get())
     };

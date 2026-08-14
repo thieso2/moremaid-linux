@@ -19,7 +19,8 @@ moremaid README.md            # open a markdown file
 mm README.md                  # same binary, shorter to type
 moremaid docs/                # browse a directory (Navigator + index page)
 moremaid                      # browse the current directory
-moremaid src/main.rs          # any text file renders as highlighted code
+moremaid page.html            # HTML files render as documents
+moremaid src/main.rs          # any other text file renders as highlighted code
 cat notes.md | moremaid       # stdin; relative links resolve from the CWD
 ```
 

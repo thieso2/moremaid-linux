@@ -97,6 +97,12 @@ pub fn is_markdown(file_name: &str) -> bool {
     lower.ends_with(".md") || lower.ends_with(".markdown")
 }
 
+/// HTML files render as documents, not as highlighted markup (§7 htmlPage).
+pub fn is_html(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +127,13 @@ mod tests {
         assert!(is_markdown("README.md"));
         assert!(is_markdown("notes.MARKDOWN"));
         assert!(!is_markdown("main.rs"));
+    }
+
+    #[test]
+    fn html_detection() {
+        assert!(is_html("page.html"));
+        assert!(is_html("INDEX.HTM"));
+        assert!(!is_html("page.html.bak"));
+        assert!(!is_html("README.md"));
     }
 }
