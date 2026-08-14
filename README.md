@@ -46,6 +46,7 @@ back/forward buttons work everywhere.
 | `Ctrl+P` or `/` | Quick Open — fuzzy filename finder |
 | `Ctrl+Shift+F` | Find in Files — full-text, streamed |
 | `Tab` | switch search mode (filename ↔ content) |
+| `Ctrl+O` / `Ctrl+Shift+O` | open a file / a folder (folder → new window) |
 | `Ctrl+B` | pin / unpin the Navigator |
 | `Alt+Left` / `Alt+Right` | back / forward (also mouse buttons 8/9) |
 | `j` `k`, `gg` `G`, `Ctrl+D` `Ctrl+U` | scroll (vim keys are baseline) |

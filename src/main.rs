@@ -572,6 +572,8 @@ fn show_shortcuts_dialog(window: &gtk4::ApplicationWindow) {
     dialog.add(add_section(
         "Windows",
         &[
+            ("Open file", "<Control>o"),
+            ("Open folder", "<Control><Shift>o"),
             ("Back / Forward", "<Alt>Left <Alt>Right"),
             ("Pin Navigator", "<Control>b"),
             ("New window", "<Control>n"),
@@ -1359,6 +1361,75 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     });
     let go_back = make("go-back", ctx, |c| go_history(c, -1));
     let go_forward = make("go-forward", ctx, |c| go_history(c, 1));
+    // Ctrl+O / Ctrl+Shift+O: the portal file chooser (§7 FilePicker —
+    // GTK4 FileDialog goes through the XDG portal, which is why
+    // xdg-desktop-portal-gtk is a hard dependency)
+    let open_file = make("open-file", ctx, |c| {
+        let filter = gtk4::FileFilter::new();
+        filter.set_name(Some("Markdown & HTML"));
+        for pattern in ["*.md", "*.markdown", "*.html", "*.htm"] {
+            filter.add_pattern(pattern);
+        }
+        let all = gtk4::FileFilter::new();
+        all.set_name(Some("All files"));
+        all.add_pattern("*");
+        let filters = gio::ListStore::new::<gtk4::FileFilter>();
+        filters.append(&filter);
+        filters.append(&all);
+
+        let dialog = gtk4::FileDialog::builder()
+            .title("Open File")
+            .filters(&filters)
+            .default_filter(&filter)
+            .build();
+        let start_dir = c
+            .doc_path
+            .borrow()
+            .as_deref()
+            .and_then(|p| p.parent().map(Path::to_path_buf))
+            .or_else(|| c.root_dir.borrow().clone());
+        if let Some(dir) = start_dir {
+            dialog.set_initial_folder(Some(&gio::File::for_path(dir)));
+        }
+        let c = c.clone();
+        dialog.open(
+            Some(&c.window.clone()),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        if is_text_file(&path) {
+                            load_path(&c, &path);
+                        } else {
+                            eprintln!(
+                                "moremaid: {} is not a text file",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+            },
+        );
+    });
+    let open_folder = make("open-folder", ctx, |c| {
+        let dialog = gtk4::FileDialog::builder().title("Open Folder").build();
+        if let Some(root) = c.root_dir.borrow().clone() {
+            dialog.set_initial_folder(Some(&gio::File::for_path(root)));
+        }
+        dialog.select_folder(
+            Some(&c.window.clone()),
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let Ok(folder) = result {
+                    if let Some(path) = folder.path() {
+                        // a browse root is a per-window thing (§6.1) —
+                        // folders open as their own process
+                        spawn_window_for(&path);
+                    }
+                }
+            },
+        );
+    });
     // Ctrl+M: rendered document ↔ raw markdown source
     let toggle_source = make("toggle-source", ctx, |c| {
         c.view_source.set(!c.view_source.get());
@@ -1386,7 +1457,7 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     for a in [
         &zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar,
         &quick_open, &find_in_files, &new_window, &show_shortcuts,
-        &go_back, &go_forward, &toggle_source,
+        &go_back, &go_forward, &toggle_source, &open_file, &open_folder,
     ] {
         ctx.window.add_action(a);
     }
@@ -1422,4 +1493,6 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     app.set_accels_for_action("win.go-back", &["<Alt>Left"]);
     app.set_accels_for_action("win.go-forward", &["<Alt>Right"]);
     app.set_accels_for_action("win.toggle-source", &["<Control>m"]);
+    app.set_accels_for_action("win.open-file", &["<Control>o"]);
+    app.set_accels_for_action("win.open-folder", &["<Control><Shift>o"]);
 }
