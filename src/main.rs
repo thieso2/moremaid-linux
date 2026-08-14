@@ -50,6 +50,29 @@ fn main() -> glib::ExitCode {
     let started = Instant::now();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("-v") | Some("--version") => {
+            println!("moremaid {}", env!("CARGO_PKG_VERSION"));
+            return glib::ExitCode::SUCCESS;
+        }
+        Some("-h") | Some("--help") => {
+            println!(
+                "moremaid {} — a markdown reader with first-class Mermaid support\n\
+                 \n\
+                 usage: moremaid [FILE | DIRECTORY]\n\
+                 \n\
+                        moremaid README.md     open a markdown file\n\
+                        moremaid docs/         browse a directory\n\
+                        moremaid               browse the current directory\n\
+                        cat notes.md | moremaid    read from stdin\n\
+                 \n\
+                 Press ? or F1 in the app for the full keyboard reference.",
+                env!("CARGO_PKG_VERSION")
+            );
+            return glib::ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     let target = match parse_target(&args) {
         Ok(t) => t,
         Err(msg) => {

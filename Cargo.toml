@@ -1,6 +1,7 @@
 [package]
 name = "moremaid"
-version = "0.1.0"
+# keep in lockstep with packaging/PKGBUILD pkgver — the release checklist
+version = "0.8.0"
 edition = "2021"
 description = "A markdown reader with first-class Mermaid diagram support, for Omarchy/Hyprland"
 license = "MIT"
