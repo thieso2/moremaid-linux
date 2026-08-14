@@ -267,9 +267,13 @@ fn children_for(inner: &Rc<Inner>, item: &glib::Object) -> Option<gio::ListModel
         Node::Folder { rel, .. } => {
             Some(ensure_dir_store(inner, &rel).upcast())
         }
-        Node::File { abs, .. } => {
+        Node::File { abs, name } => {
             let content = std::fs::read_to_string(&abs).ok()?;
-            let hs = headings::extract_headings(&content);
+            let hs = if crate::langmap::is_html(&name) {
+                headings::extract_headings_html(&content)
+            } else {
+                headings::extract_headings(&content)
+            };
             if hs.is_empty() {
                 return None;
             }

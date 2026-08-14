@@ -7,7 +7,7 @@
 #   makepkg -si  (with source=() pointing at your checkout, see below)
 
 pkgname=moremaid
-pkgver=0.6.0
+pkgver=0.7.0
 pkgrel=1
 pkgdesc="Markdown reader with first-class Mermaid diagram support, for Omarchy/Hyprland"
 arch=('x86_64')

@@ -1,0 +1,384 @@
+/* Moremaid document stylesheet.
+ * Ported from MoremaidApp Sources/Rendering/BaseCSS.swift @ a3ab7fd, with the
+ * HANDOFF §4 edits: macOS font stacks stripped, typography styles deleted,
+ * dead chrome (theme picker, zoom controls, PDF buttons) removed, blockquote
+ * edge moved to the accent role, ::selection fed from the palette.
+ * Colour and font custom properties are interpolated by the app (see §6.3/§6.4).
+ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-body);
+    background: var(--bg-color);
+    color: var(--text-color);
+    margin: 0;
+    padding: 30px;
+    line-height: var(--line-height);
+    font-size: var(--font-size-base);
+    transition: background-color 0.3s, color 0.3s;
+    min-height: 100vh;
+}
+
+::selection {
+    background: var(--selection-color);
+}
+
+.container {
+    max-width: var(--max-width);
+    margin: 0 auto;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    color: var(--heading-color);
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+}
+
+h1 { font-size: 2em; border-bottom: 2px solid var(--border-color); padding-bottom: 10px; margin-bottom: 20px; }
+h2 { font-size: 1.5em; color: var(--heading2-color); margin-top: 30px; margin-bottom: 15px; border-bottom: 1px solid var(--border-color); padding-bottom: 5px; }
+h3 { font-size: 1.25em; color: var(--heading2-color); margin-top: 20px; margin-bottom: 10px; }
+h4 { font-size: 1.1em; }
+h5 { font-size: 1em; }
+h6 { font-size: 0.9em; }
+
+p {
+    margin-bottom: var(--paragraph-spacing);
+    text-align: var(--text-align);
+}
+
+code, pre {
+    font-family: var(--font-code) !important;
+}
+
+code:not([class*="language-"]) {
+    background: var(--code-bg);
+    padding: 2px 5px;
+    border-radius: 3px;
+    color: var(--code-color);
+}
+
+pre {
+    margin: 15px 0;
+    border-radius: 5px;
+    overflow: hidden;
+}
+
+pre[class*="language-"] {
+    margin: 15px 0;
+    padding: 1em;
+    border-radius: 5px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+pre code:not([class*="language-"]) {
+    padding: 0;
+    background: transparent;
+}
+
+blockquote {
+    padding-left: 20px;
+    margin: 20px 0;
+    color: var(--blockquote-color);
+    font-style: italic;
+    border-left: 4px solid var(--accent-dim);
+}
+
+a { color: var(--link-color); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a[href^="http"]::after, a[href^="//"]::after {
+    content: "";
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    margin-left: 0.15em;
+    vertical-align: baseline;
+    position: relative;
+    top: -0.1em;
+    background-color: var(--link-color);
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.75 2A1.75 1.75 0 002 3.75v8.5c0 .966.784 1.75 1.75 1.75h8.5A1.75 1.75 0 0014 12.25v-3.5a.75.75 0 00-1.5 0v3.5a.25.25 0 01-.25.25h-8.5a.25.25 0 01-.25-.25v-8.5a.25.25 0 01.25-.25h3.5a.75.75 0 000-1.5h-3.5zm6.75 0a.75.75 0 000 1.5h1.94L8.22 7.72a.75.75 0 001.06 1.06l4.22-4.22v1.94a.75.75 0 001.5 0V2.75a.75.75 0 00-.75-.75h-4.5z'/%3E%3C/svg%3E");
+    -webkit-mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    opacity: 0.6;
+}
+
+ul, ol {
+    margin-left: 30px;
+    margin-bottom: 15px;
+}
+
+li { margin: 5px 0; }
+
+/* GFM task lists */
+li.task-list-item { list-style: none; margin-left: -20px; }
+li.task-list-item input[type="checkbox"] { margin-right: 6px; accent-color: var(--accent-color); }
+
+table {
+    border-collapse: collapse;
+    margin: 20px 0;
+    width: 100%;
+}
+
+table th, table td {
+    border: 1px solid var(--table-border);
+    padding: 10px;
+    text-align: left;
+}
+
+table th {
+    background: var(--table-header-bg);
+    font-weight: bold;
+}
+
+table.auto-index {
+    border: none;
+    margin: 0;
+}
+
+table.auto-index th,
+table.auto-index td {
+    border: none;
+    border-bottom: 1px solid var(--table-border);
+    padding: 6px 12px;
+}
+
+table.auto-index th {
+    background: transparent;
+    font-weight: 500;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--secondary-text, #888);
+    padding-bottom: 8px;
+}
+
+table.auto-index td {
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+table.auto-index tr:last-child td {
+    border-bottom: none;
+}
+
+table.auto-index tr:hover td {
+    background: var(--table-header-bg);
+}
+
+table.auto-index .ai-size,
+table.auto-index th[data-sort="size"] {
+    text-align: right;
+    white-space: nowrap;
+}
+
+table.auto-index .ai-date,
+table.auto-index th[data-sort="modified"] {
+    white-space: nowrap;
+    color: var(--secondary-text, #888);
+}
+
+table.auto-index td .ai-date {
+    color: var(--secondary-text, #888);
+}
+
+table.auto-index .ai-size {
+    color: var(--secondary-text, #888);
+}
+
+table.auto-index th.ai-sortable {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+table.auto-index th.ai-sortable:hover {
+    color: var(--text-color);
+}
+
+table.auto-index .sort-indicator {
+    opacity: 0.6;
+    font-size: 0.85em;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 2em 0;
+}
+
+img { max-width: 100%; height: auto; }
+
+/* Mermaid diagram styling */
+.mermaid {
+    text-align: center;
+    margin: 20px 0;
+    position: relative;
+    display: block;
+    width: 100%;
+}
+
+.mermaid-container {
+    position: relative;
+    display: block;
+    width: 100%;
+}
+
+.mermaid-container svg {
+    max-width: 100%;
+    height: auto;
+}
+
+.mermaid-fullscreen-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: var(--mermaid-btn-bg);
+    color: var(--bg-color);
+    border: none;
+    border-radius: 4px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-size: 18px;
+    z-index: 10;
+    opacity: 0;
+    transition: background 0.2s, opacity 0.2s;
+}
+
+.mermaid-container:hover .mermaid-fullscreen-btn { opacity: 1; }
+
+.mermaid-fullscreen-btn:hover {
+    background: var(--mermaid-btn-hover);
+}
+
+/* Mermaid parse-error block (§8) */
+.mermaid-error {
+    text-align: left;
+    background: var(--code-bg);
+    border-left: 4px solid var(--error-color);
+    border-radius: 5px;
+    padding: 12px 16px;
+    margin: 20px 0;
+}
+
+.mermaid-error .mermaid-error-title {
+    color: var(--error-color);
+    font-weight: bold;
+    margin-bottom: 8px;
+}
+
+.mermaid-error pre {
+    margin: 8px 0 0 0;
+    white-space: pre-wrap;
+    background: transparent;
+}
+
+/* Code block copy button */
+.code-block-wrapper {
+    position: relative;
+    margin: 15px 0;
+}
+
+.code-block-wrapper pre { margin: 0; }
+
+.copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--mermaid-btn-bg);
+    color: var(--bg-color);
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: var(--font-body);
+    opacity: 0;
+    transition: opacity 0.3s, background 0.3s;
+    z-index: 10;
+}
+
+.code-block-wrapper:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { background: var(--mermaid-btn-hover); }
+.copy-btn:active { transform: scale(0.95); }
+
+/* File info bar */
+.file-info {
+    background: var(--file-info-bg);
+    padding: 10px 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    font-size: 14px;
+    color: var(--file-info-color);
+}
+
+.nav-bar {
+    margin-bottom: 20px;
+}
+
+.nav-bar a {
+    text-decoration: none;
+    color: var(--link-color);
+    font-size: 14px;
+}
+
+/* Shared banner component (§8) — never blocks content */
+.moremaid-banner {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--file-info-bg);
+    border-left: 4px solid var(--accent-color);
+    padding: 10px 15px;
+    margin: -30px -30px 20px -30px;
+    font-size: 14px;
+    color: var(--text-color);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.moremaid-banner-dismiss {
+    background: transparent;
+    color: var(--secondary-text);
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 6px;
+}
+
+.moremaid-banner-dismiss:hover {
+    color: var(--text-color);
+}
+
+/* Print styles — force light colors so dark palettes don't produce invisible text */
+@media print {
+    :root {
+        --bg-color: white !important;
+        --text-color: #333 !important;
+        --heading-color: #2c3e50 !important;
+        --heading2-color: #34495e !important;
+        --border-color: #ddd !important;
+        --code-bg: #f4f4f4 !important;
+        --code-color: #d14 !important;
+        --link-color: #2c3e50 !important;
+        --blockquote-color: #555 !important;
+        --table-header-bg: #f0f0f0 !important;
+        --table-border: #ddd !important;
+        --file-info-bg: #f5f5f5 !important;
+        --file-info-color: #666 !important;
+    }
+    .container { max-width: 100% !important; }
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; padding: 0 !important; }
+    pre, code { white-space: pre-wrap !important; word-wrap: break-word !important; }
+    h1, h2, h3, h4, h5, h6 { break-after: avoid; }
+    p, li, blockquote { orphans: 3; widows: 3; }
+    pre, table, img, figure, .mermaid-container { break-inside: avoid; }
+    tr { break-inside: avoid; }
+}

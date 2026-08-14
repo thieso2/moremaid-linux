@@ -27,8 +27,8 @@ cat notes.md | moremaid       # stdin; relative links resolve from the CWD
 Files can also be dropped onto the window, or opened from a file manager
 (the package associates with `text/markdown` without grabbing the default).
 
-In directory mode the Navigator (folders, files, and the headings inside
-them) auto-hides so reading gets the full width: move the pointer to the
+In directory mode the Navigator (folders, markdown and HTML files, and the
+headings inside them) auto-hides so reading gets the full width: move the pointer to the
 left edge to reveal it, move away to dismiss, `Ctrl+B` to pin it open.
 
 Links navigate in place — internal markdown links (including cross-file

@@ -70,6 +70,106 @@ pub fn extract_headings(markdown: &str) -> Vec<Heading> {
     results
 }
 
+/// Headings of an HTML document, for the Navigator. Ported from
+/// HeadingParser.extractHeadings(fromHTML:) @ a3ab7fd: prefer `<main>`,
+/// else drop aside/nav/header/footer; always drop script/style/pre;
+/// existing `id` attributes win, otherwise the text is slugified with
+/// "heading" as the empty fallback.
+pub fn extract_headings_html(html: &str) -> Vec<Heading> {
+    let structural = first_tag_body(html, "main")
+        .unwrap_or_else(|| remove_blocks(html, &["aside", "nav", "header", "footer"]));
+    let cleaned = remove_blocks(&structural, &["script", "style", "pre"]);
+    let cleaned_lower = cleaned.to_ascii_lowercase();
+
+    let open_re = regex::Regex::new(r"(?is)<h([1-6])\b([^>]*)>").unwrap();
+    let tag_re = regex::Regex::new(r"<[^>]+>").unwrap();
+    let id_re =
+        regex::Regex::new(r#"(?i)\bid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))"#).unwrap();
+
+    let mut id_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut results = Vec::new();
+
+    for cap in open_re.captures_iter(&cleaned) {
+        let level: u8 = cap[1].parse().unwrap_or(1);
+        let attrs = cap.get(2).map(|m| m.as_str()).unwrap_or("");
+        let body_start = cap.get(0).unwrap().end();
+        // Rust regex has no backreferences — find the matching close by hand
+        let close_pat = format!("</h{level}");
+        let Some(rel) = cleaned_lower[body_start..].find(&close_pat) else {
+            continue;
+        };
+        let body = &cleaned[body_start..body_start + rel];
+
+        let text = decode_entities(&tag_re.replace_all(body, " "))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.is_empty() {
+            continue;
+        }
+
+        let existing_id = id_re.captures(attrs).and_then(|c| {
+            c.get(1).or_else(|| c.get(2)).or_else(|| c.get(3)).map(|m| m.as_str())
+        });
+        let id = match existing_id.filter(|id| !id.is_empty()) {
+            Some(id) => {
+                let id = decode_entities(id);
+                *id_counts.entry(id.clone()).or_insert(0) += 1;
+                id
+            }
+            None => {
+                let slug = slugify(&text);
+                let base = if slug.is_empty() { "heading".to_string() } else { slug };
+                match id_counts.get_mut(&base) {
+                    Some(count) => {
+                        let id = format!("{base}-{count}");
+                        *count += 1;
+                        id
+                    }
+                    None => {
+                        id_counts.insert(base.clone(), 1);
+                        base
+                    }
+                }
+            }
+        };
+        results.push(Heading { level, text, id });
+    }
+    results
+}
+
+fn first_tag_body(html: &str, tag: &str) -> Option<String> {
+    let re = regex::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>(.*?)</{tag}\s*>")).unwrap();
+    re.captures(html).map(|c| c[1].to_string())
+}
+
+fn remove_blocks(html: &str, tags: &[&str]) -> String {
+    let mut out = html.to_string();
+    for tag in tags {
+        let re = regex::Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?</{tag}\s*>")).unwrap();
+        out = re.replace_all(&out, "").to_string();
+    }
+    out
+}
+
+fn decode_entities(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '&' {
+            if let Some((decoded, next)) = parse_entity(&chars, i) {
+                out.push(decoded);
+                i = next;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 /// Byte-identical port of page.js `slugify`:
 ///   s.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
 ///    .replace(/-+/g, '-').replace(/^-|-$/g, '')
@@ -503,6 +603,43 @@ mod tests {
         assert_eq!(slugify("--x--"), "x");
         assert_eq!(slugify("???"), "");
         assert_eq!(slugify("snake_case ok"), "snake_case-ok");
+    }
+
+    #[test]
+    fn html_headings_basics() {
+        let html = r#"<html><body>
+            <nav><h1>Site nav</h1></nav>
+            <h1>Title</h1>
+            <h2 id="custom-id">Has &amp; keeps its id</h2>
+            <h2>Dup</h2>
+            <h2>Dup</h2>
+            <pre><h3>inside pre, ignored</h3></pre>
+            <script>document.write("<h4>scripted</h4>")</script>
+            <h3><em>Nested</em> markup</h3>
+        </body></html>"#;
+        let hs = extract_headings_html(html);
+        let got: Vec<(u8, &str, &str)> =
+            hs.iter().map(|h| (h.level, h.text.as_str(), h.id.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, "Title", "title"),
+                (2, "Has & keeps its id", "custom-id"),
+                (2, "Dup", "dup"),
+                (2, "Dup", "dup-1"),
+                (3, "Nested markup", "nested-markup"),
+            ]
+        );
+    }
+
+    #[test]
+    fn html_main_tag_wins() {
+        let html = r#"<header><h1>Chrome</h1></header>
+            <main><h1>Real</h1></main>
+            <footer><h2>Footer</h2></footer>"#;
+        let hs = extract_headings_html(html);
+        assert_eq!(hs.len(), 1);
+        assert_eq!(hs[0].text, "Real");
     }
 
     #[test]

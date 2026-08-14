@@ -33,7 +33,7 @@ pub fn scan_into(root: &Path, mut on_batch: impl FnMut(Vec<PathBuf>)) {
             continue;
         }
         let name = entry.file_name().to_string_lossy();
-        if !crate::langmap::is_markdown(&name) {
+        if !crate::langmap::is_markdown(&name) && !crate::langmap::is_html(&name) {
             continue;
         }
         batch.push(entry.into_path());
@@ -94,6 +94,7 @@ mod tests {
         fs::write(root.join("a.md"), "# a").unwrap();
         fs::write(root.join("b.markdown"), "# b").unwrap();
         fs::write(root.join("notes.txt"), "not markdown").unwrap();
+        fs::write(root.join("page.html"), "<h1>hi</h1>").unwrap();
         fs::create_dir_all(root.join("sub/deep")).unwrap();
         fs::write(root.join("sub/deep/c.md"), "# c").unwrap();
         fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
@@ -102,8 +103,10 @@ mod tests {
         fs::write(root.join(".git/x.md"), "skip").unwrap();
 
         let got = scan_all(&root);
-        let expected: BTreeSet<String> =
-            ["a.md", "b.markdown", "sub/deep/c.md"].iter().map(|s| s.to_string()).collect();
+        let expected: BTreeSet<String> = ["a.md", "b.markdown", "page.html", "sub/deep/c.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(got, expected);
         let _ = fs::remove_dir_all(&root);
     }
