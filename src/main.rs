@@ -33,6 +33,19 @@ enum Target {
     Stdin(String),
 }
 
+#[derive(Clone, PartialEq)]
+enum HistoryEntry {
+    File(PathBuf),
+    Dir(PathBuf),
+}
+
+struct TopBar {
+    widget: gtk4::Box,
+    back: gtk4::Button,
+    forward: gtk4::Button,
+    title: gtk4::Label,
+}
+
 fn main() -> glib::ExitCode {
     let started = Instant::now();
 
@@ -141,6 +154,14 @@ struct WindowCtx {
     /// Ctrl+B pins the Navigator open; unpinned it auto-hides and reveals
     /// on a left-edge hover
     sidebar_pinned: Cell<bool>,
+    /// navigation history — load_html has no WebKit history, so back and
+    /// forward are ours to keep
+    history: RefCell<Vec<HistoryEntry>>,
+    history_pos: Cell<usize>,
+    /// true while executing a back/forward jump, so the resulting load
+    /// doesn't re-record itself
+    in_history_nav: Cell<bool>,
+    topbar: RefCell<Option<Rc<TopBar>>>,
     /// monotonically increasing per-load token, echoed back by the page's
     /// loadComplete so a superseded page cannot consume the next page's
     /// pending anchor or search highlight
@@ -216,6 +237,10 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         text_scale: Cell::new(1.0),
         interface_settings: RefCell::new(None),
         sidebar_pinned: Cell::new(false),
+        history: RefCell::new(Vec::new()),
+        history_pos: Cell::new(0),
+        in_history_nav: Cell::new(false),
+        topbar: RefCell::new(None),
         load_seq: Cell::new(0),
         load_complete: Cell::new(false),
     });
@@ -294,17 +319,28 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
 
     arm_theme_watcher(&ctx);
 
+    // Every mode shares the overlay stack: webview at the bottom, then the
+    // Navigator (dir mode), the top bar, and the search overlay on top.
+    apply_chrome_css(&ctx.palette.borrow(), &ctx.fonts);
+    let overlay_root = gtk4::Overlay::new();
+    overlay_root.set_child(Some(&webview));
+    let topbar = build_topbar(&ctx);
+    ctx.topbar.replace(Some(topbar.clone()));
+
     match target {
         Target::File(path) => {
-            window.set_child(Some(&webview));
+            overlay_root.add_overlay(&topbar.widget);
+            window.set_child(Some(&overlay_root));
+            install_edge_reveal(&ctx, &overlay_root);
             load_path(&ctx, &path);
         }
         Target::Stdin(src) => {
-            window.set_child(Some(&webview));
+            overlay_root.add_overlay(&topbar.widget);
+            window.set_child(Some(&overlay_root));
+            install_edge_reveal(&ctx, &overlay_root);
             load_stdin(&ctx, src);
         }
         Target::Dir(dir) => {
-            apply_chrome_css(&ctx.palette.borrow(), &ctx.fonts);
             ctx.root_dir.replace(Some(dir.clone()));
             let sb = {
                 let ctx = ctx.clone();
@@ -386,37 +422,16 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                     }
                 });
             }
-            let overlay_container = gtk4::Overlay::new();
-            overlay_container.set_child(Some(&webview));
-            overlay_container.add_overlay(&sb.widget);
+            overlay_root.add_overlay(&sb.widget);
+            overlay_root.add_overlay(&topbar.widget);
             search_overlay.widget.set_halign(gtk4::Align::Center);
             search_overlay.widget.set_valign(gtk4::Align::Start);
             search_overlay.widget.set_margin_top(48);
-            overlay_container.add_overlay(&search_overlay.widget);
-            window.set_child(Some(&overlay_container));
+            overlay_root.add_overlay(&search_overlay.widget);
+            window.set_child(Some(&overlay_root));
             ctx.sidebar.replace(Some(sb.clone()));
             ctx.overlay.replace(Some(search_overlay));
-
-            // reveal on left-edge hover, retract when the pointer moves
-            // past the (unpinned) Navigator
-            {
-                let ctx = ctx.clone();
-                let sb = sb.clone();
-                let motion = gtk4::EventControllerMotion::new();
-                // capture phase: the WebView must not swallow pointer motion
-                motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
-                motion.connect_motion(move |_, x, _| {
-                    if ctx.sidebar_pinned.get() {
-                        return;
-                    }
-                    if x <= 2.0 && !sb.widget.is_visible() {
-                        sb.widget.set_visible(true);
-                    } else if sb.widget.is_visible() && x > f64::from(sb.widget.width().max(280)) + 8.0 {
-                        sb.widget.set_visible(false);
-                    }
-                });
-                overlay_container.add_controller(motion);
-            }
+            install_edge_reveal(&ctx, &overlay_root);
 
             load_auto_index(&ctx, &dir);
 
@@ -536,7 +551,8 @@ fn show_shortcuts_dialog(window: &gtk4::ApplicationWindow) {
     dialog.add(add_section(
         "Windows",
         &[
-            ("Toggle Navigator", "<Control>b"),
+            ("Back / Forward", "<Alt>Left <Alt>Right"),
+            ("Pin Navigator", "<Control>b"),
             ("New window", "<Control>n"),
             ("Open link in new window", "<Control>Pointer_Button1"),
             ("Shortcuts", "question"),
@@ -700,6 +716,149 @@ fn install_drop_target(ctx: &Rc<WindowCtx>) {
     ctx.window.add_controller(drop);
 }
 
+/// One capture-phase motion controller drives both auto-hides: the top bar
+/// reveals on a top-edge hover, the (unpinned) Navigator on a left-edge
+/// hover; each retracts when the pointer moves past it.
+fn install_edge_reveal(ctx: &Rc<WindowCtx>, overlay_root: &gtk4::Overlay) {
+    let ctx = ctx.clone();
+    let motion = gtk4::EventControllerMotion::new();
+    // capture phase: the WebView must not swallow pointer motion
+    motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    motion.connect_motion(move |_, x, y| {
+        if let Some(topbar) = &*ctx.topbar.borrow() {
+            let bar = &topbar.widget;
+            if y <= 2.0 && !bar.is_visible() {
+                bar.set_visible(true);
+            } else if bar.is_visible() && y > f64::from(bar.height().max(40)) + 8.0 {
+                bar.set_visible(false);
+            }
+        }
+        if let Some(sb) = &*ctx.sidebar.borrow() {
+            if ctx.sidebar_pinned.get() {
+                return;
+            }
+            if x <= 2.0 && !sb.widget.is_visible() {
+                sb.widget.set_visible(true);
+            } else if sb.widget.is_visible()
+                && x > f64::from(sb.widget.width().max(280)) + 8.0
+            {
+                sb.widget.set_visible(false);
+            }
+        }
+    });
+    overlay_root.add_controller(motion);
+}
+
+/// Record a completed navigation. A back/forward jump re-loads without
+/// re-recording; a fresh navigation truncates the forward branch.
+fn record_history(ctx: &Rc<WindowCtx>, entry: HistoryEntry) {
+    if !ctx.in_history_nav.get() {
+        let mut history = ctx.history.borrow_mut();
+        let pos = ctx.history_pos.get();
+        let is_current = history.get(pos) == Some(&entry);
+        if !is_current {
+            if !history.is_empty() {
+                history.truncate(pos + 1);
+            }
+            history.push(entry);
+            ctx.history_pos.set(history.len() - 1);
+        }
+    }
+    update_nav_state(ctx);
+}
+
+fn go_history(ctx: &Rc<WindowCtx>, delta: i64) {
+    let entry = {
+        let history = ctx.history.borrow();
+        let pos = ctx.history_pos.get() as i64 + delta;
+        if pos < 0 || pos as usize >= history.len() {
+            return;
+        }
+        ctx.history_pos.set(pos as usize);
+        history[pos as usize].clone()
+    };
+    ctx.in_history_nav.set(true);
+    match &entry {
+        HistoryEntry::File(path) => {
+            load_path(ctx, path);
+        }
+        HistoryEntry::Dir(dir) => load_auto_index(ctx, dir),
+    }
+    ctx.in_history_nav.set(false);
+    update_nav_state(ctx);
+}
+
+fn update_nav_state(ctx: &Rc<WindowCtx>) {
+    if let Some(topbar) = &*ctx.topbar.borrow() {
+        let len = ctx.history.borrow().len();
+        let pos = ctx.history_pos.get();
+        topbar.back.set_sensitive(pos > 0 && len > 0);
+        topbar.forward.set_sensitive(len > 0 && pos + 1 < len);
+        let title = match ctx.history.borrow().get(pos) {
+            Some(HistoryEntry::File(p)) | Some(HistoryEntry::Dir(p)) => {
+                display_path(ctx, p)
+            }
+            None => String::new(),
+        };
+        topbar.title.set_text(&title);
+    }
+}
+
+/// Breadcrumb-ish: relative to the browse root where there is one.
+fn display_path(ctx: &Rc<WindowCtx>, path: &Path) -> String {
+    if let Some(root) = &*ctx.root_dir.borrow() {
+        if path == root {
+            return root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| root.display().to_string());
+        }
+        if let Ok(rel) = path.strip_prefix(root) {
+            return rel.display().to_string();
+        }
+    }
+    path.display().to_string()
+}
+
+/// Back/forward in an auto-hiding top bar — revealed by a top-edge hover,
+/// like the Navigator on the left.
+fn build_topbar(ctx: &Rc<WindowCtx>) -> Rc<TopBar> {
+    let back = gtk4::Button::from_icon_name("go-previous-symbolic");
+    back.set_tooltip_text(Some("Back (Alt+Left)"));
+    back.set_sensitive(false);
+    let forward = gtk4::Button::from_icon_name("go-next-symbolic");
+    forward.set_tooltip_text(Some("Forward (Alt+Right)"));
+    forward.set_sensitive(false);
+    let title = gtk4::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::Start)
+        .build();
+    title.add_css_class("moremaid-topbar-title");
+
+    let widget = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(6)
+        .valign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    widget.add_css_class("moremaid-topbar");
+    widget.append(&back);
+    widget.append(&forward);
+    widget.append(&title);
+
+    {
+        let ctx = ctx.clone();
+        back.connect_clicked(move |_| go_history(&ctx, -1));
+    }
+    {
+        let ctx = ctx.clone();
+        forward.connect_clicked(move |_| go_history(&ctx, 1));
+    }
+
+    Rc::new(TopBar { widget, back, forward, title })
+}
+
 fn parse_headings_message(s: &str) -> Option<Vec<headings::Heading>> {
     let v: serde_json::Value = serde_json::from_str(s).ok()?;
     let hs = v.get("headings")?.as_array()?;
@@ -760,6 +919,11 @@ paned > separator {{ background-color: {muted}; min-width: 1px; }}
 .moremaid-overlay listview row:selected {{ background-color: {selection}; }}
 .moremaid-overlay-mode {{ color: {dim}; font-size: 90%; }}
 .moremaid-overlay-snippet {{ color: {dim}; font-size: 90%; font-family: monospace; }}
+.moremaid-topbar {{ background-color: {raised}; color: {fg}; border-bottom: 1px solid {muted}; padding: 4px 8px; font-family: {font_body}; }}
+.moremaid-topbar button {{ background: transparent; border: none; box-shadow: none; color: {fg}; min-width: 28px; min-height: 28px; }}
+.moremaid-topbar button:disabled {{ color: {muted}; }}
+.moremaid-topbar button:hover {{ background-color: {selection}; }}
+.moremaid-topbar-title {{ color: {dim}; font-size: 95%; }}
 "#,
         font_body = fonts.body_stack,
         bg = palette.get("background"),
@@ -833,6 +997,7 @@ fn load_auto_index(ctx: &Rc<WindowCtx>, dir: &Path) {
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some(&format!("{title} — Moremaid")));
     ctx.webview.load_html(&page, Some(&base));
+    record_history(ctx, HistoryEntry::Dir(dir.to_path_buf()));
 }
 
 fn doc_uri(path: &Path) -> String {
@@ -953,6 +1118,7 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
     ctx.window.set_title(Some(&format!("{file_name} — Moremaid")));
     ctx.webview.load_html(&page, Some(&base));
     arm_doc_watcher(ctx);
+    record_history(ctx, HistoryEntry::File(path.to_path_buf()));
     true
 }
 
@@ -1008,6 +1174,7 @@ fn connect_link_policy(ctx: &Rc<WindowCtx>, _app: &gtk4::Application) {
         }
 
         if let Some(rest) = uri.strip_prefix("moremaid://doc") {
+            let fragment = rest.split_once('#').map(|(_, f)| f.to_string());
             let without_fragment = rest.split('#').next().unwrap_or(rest);
             // same-document anchor → let WebKit scroll in place
             let base = ctx.base_uri.borrow();
@@ -1038,8 +1205,14 @@ fn connect_link_policy(ctx: &Rc<WindowCtx>, _app: &gtk4::Application) {
                 decision.ignore();
                 if new_window {
                     spawn_window_for(&path);
-                } else {
-                    load_path(&ctx, &path);
+                } else if load_path(&ctx, &path) {
+                    // a cross-file anchor link ("other.md#section") keeps
+                    // its fragment: jump once the target page completes
+                    if let Some(fragment) = fragment {
+                        if !fragment.is_empty() {
+                            ctx.pending_anchor.replace(Some(fragment));
+                        }
+                    }
                 }
                 return true;
             }
@@ -1145,6 +1318,8 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     let show_shortcuts = make("show-shortcuts", ctx, |c| {
         show_shortcuts_dialog(&c.window);
     });
+    let go_back = make("go-back", ctx, |c| go_history(c, -1));
+    let go_forward = make("go-forward", ctx, |c| go_history(c, 1));
     let new_window = make("new-window", ctx, |c| {
         let target = c
             .root_dir
@@ -1159,8 +1334,26 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     for a in [
         &zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar,
         &quick_open, &find_in_files, &new_window, &show_shortcuts,
+        &go_back, &go_forward,
     ] {
         ctx.window.add_action(a);
+    }
+
+    // mouse back/forward buttons (8/9), captured before the WebView
+    {
+        let ctx_click = ctx.clone();
+        let gesture = gtk4::GestureClick::new();
+        gesture.set_button(0);
+        gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        gesture.connect_pressed(move |gesture, _, _, _| {
+            match gesture.current_button() {
+                8 => go_history(&ctx_click, -1),
+                9 => go_history(&ctx_click, 1),
+                _ => return,
+            }
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+        });
+        ctx.window.add_controller(gesture);
     }
     // Ctrl for the app; Super is the compositor's and must never be bound (§6.5).
     app.set_accels_for_action("win.zoom-in", &["<Control>plus", "<Control>equal", "<Control>KP_Add"]);
@@ -1174,4 +1367,6 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     // `?` (in the vim-key controller) is the canonical binding; F1 is the
     // conventional fallback and works even where bare keys are consumed.
     app.set_accels_for_action("win.show-shortcuts", &["F1"]);
+    app.set_accels_for_action("win.go-back", &["<Alt>Left"]);
+    app.set_accels_for_action("win.go-forward", &["<Alt>Right"]);
 }

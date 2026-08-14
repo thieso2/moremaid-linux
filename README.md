@@ -30,6 +30,12 @@ In directory mode the Navigator (folders, files, and the headings inside
 them) auto-hides so reading gets the full width: move the pointer to the
 left edge to reveal it, move away to dismiss, `Ctrl+B` to pin it open.
 
+Links navigate in place — internal markdown links (including cross-file
+anchors like `other.md#section`) open in-app, external links go to the
+system browser. A top-edge hover reveals the navigation bar with back and
+forward and the current path; `Alt+Left` / `Alt+Right` and the mouse
+back/forward buttons work everywhere.
+
 ## Keyboard
 
 `?` or `F1` shows the complete shortcuts overlay. The essentials:
@@ -40,6 +46,7 @@ left edge to reveal it, move away to dismiss, `Ctrl+B` to pin it open.
 | `Ctrl+Shift+F` | Find in Files — full-text, streamed |
 | `Tab` | switch search mode (filename ↔ content) |
 | `Ctrl+B` | pin / unpin the Navigator |
+| `Alt+Left` / `Alt+Right` | back / forward (also mouse buttons 8/9) |
 | `j` `k`, `gg` `G`, `Ctrl+D` `Ctrl+U` | scroll (vim keys are baseline) |
 | `Ctrl` `+` `-` `0` | zoom (on top of the system text scale) |
 | `Ctrl+N` | new window |
