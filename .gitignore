@@ -1,1 +1,6 @@
 /target
+/packaging/src/
+/packaging/pkg/
+/packaging/moremaid/
+/packaging/*.pkg.tar.zst
+/packaging/*.log
