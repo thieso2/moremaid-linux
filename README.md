@@ -49,6 +49,7 @@ back/forward buttons work everywhere.
 | `Alt+Left` / `Alt+Right` | back / forward (also mouse buttons 8/9) |
 | `j` `k`, `gg` `G`, `Ctrl+D` `Ctrl+U` | scroll (vim keys are baseline) |
 | `Ctrl` `+` `-` `0` | zoom (on top of the system text scale) |
+| `Ctrl+M` | toggle rendered ↔ raw markdown source |
 | `Ctrl+N` | new window |
 | `Ctrl+Shift+R` | force full render of a large document |
 | `Ctrl+click` / middle-click | open link in new window |

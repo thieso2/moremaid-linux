@@ -43,6 +43,8 @@ const EXTENSION_TO_LANGUAGE: &[(&str, &str)] = &[
     // Data & query
     ("sql", "sql"), ("proto", "protobuf"),
     // Markup & docs
+    // md/markdown only reach the code page via the view-source toggle
+    ("md", "markdown"), ("markdown", "markdown"),
     ("tex", "latex"), ("latex", "latex"), ("rst", "rest"), ("adoc", "asciidoc"),
     ("pug", "pug"), ("handlebars", "handlebars"), ("hbs", "handlebars"), ("ejs", "ejs"),
     // DevOps & build

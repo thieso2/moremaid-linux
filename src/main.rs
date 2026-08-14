@@ -162,6 +162,9 @@ struct WindowCtx {
     /// doesn't re-record itself
     in_history_nav: Cell<bool>,
     topbar: RefCell<Option<Rc<TopBar>>>,
+    /// Ctrl+M: show the raw markdown as a highlighted code page instead of
+    /// rendering it
+    view_source: Cell<bool>,
     /// monotonically increasing per-load token, echoed back by the page's
     /// loadComplete so a superseded page cannot consume the next page's
     /// pending anchor or search highlight
@@ -241,6 +244,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         history_pos: Cell::new(0),
         in_history_nav: Cell::new(false),
         topbar: RefCell::new(None),
+        view_source: Cell::new(false),
         load_seq: Cell::new(0),
         load_complete: Cell::new(false),
     });
@@ -545,6 +549,7 @@ fn show_shortcuts_dialog(window: &gtk4::ApplicationWindow) {
             ("End of document", "<Shift>g"),
             ("Zoom in / out", "<Control>plus <Control>minus"),
             ("Reset zoom", "<Control>0"),
+            ("Rendered / raw markdown", "<Control>m"),
             ("Force full render", "<Control><Shift>r"),
         ],
     ));
@@ -597,7 +602,7 @@ fn refresh_doc(ctx: &Rc<WindowCtx>, path: &Path) {
         .unwrap_or_default();
     let js = match std::fs::read_to_string(path) {
         Ok(content) => {
-            if langmap::is_markdown(&file_name) {
+            if langmap::is_markdown(&file_name) && !ctx.view_source.get() {
                 format!(
                     "moremaidClearBanner(); reRenderMarkdown({});",
                     html::json_str(&content)
@@ -1097,7 +1102,7 @@ fn load_path(ctx: &Rc<WindowCtx>, path: &Path) -> bool {
         }
     };
 
-    let page = if langmap::is_markdown(&file_name) {
+    let page = if langmap::is_markdown(&file_name) && !ctx.view_source.get() {
         html::markdown_page(
             &ctx.web_dir,
             &ctx.palette.borrow(),
@@ -1129,7 +1134,13 @@ fn load_stdin(ctx: &Rc<WindowCtx>, src: String) {
     // the command ran (§8). No live reload — there is nothing to watch.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
     let base = doc_base_uri(&cwd);
-    let page = html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "(stdin)", &src, ctx.force_full.get(), ctx.load_seq.get());
+    let page = if ctx.view_source.get() {
+        // "stdin.md" only steers Prism's language pick; the window title
+        // stays "(stdin)"
+        html::code_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "stdin.md", &src, ctx.load_seq.get())
+    } else {
+        html::markdown_page(&ctx.web_dir, &ctx.palette.borrow(), &ctx.fonts, "(stdin)", &src, ctx.force_full.get(), ctx.load_seq.get())
+    };
     ctx.stdin_src.replace(Some(src));
     ctx.base_uri.replace(base.clone());
     ctx.window.set_title(Some("(stdin) — Moremaid"));
@@ -1320,6 +1331,19 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     });
     let go_back = make("go-back", ctx, |c| go_history(c, -1));
     let go_forward = make("go-forward", ctx, |c| go_history(c, 1));
+    // Ctrl+M: rendered document ↔ raw markdown source
+    let toggle_source = make("toggle-source", ctx, |c| {
+        c.view_source.set(!c.view_source.get());
+        let path = c.doc_path.borrow().clone();
+        if let Some(path) = path {
+            load_path(c, &path);
+        } else {
+            let src = c.stdin_src.borrow().clone();
+            if let Some(src) = src {
+                load_stdin(c, src);
+            }
+        }
+    });
     let new_window = make("new-window", ctx, |c| {
         let target = c
             .root_dir
@@ -1334,7 +1358,7 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     for a in [
         &zoom_in, &zoom_out, &zoom_reset, &force_render, &toggle_sidebar,
         &quick_open, &find_in_files, &new_window, &show_shortcuts,
-        &go_back, &go_forward,
+        &go_back, &go_forward, &toggle_source,
     ] {
         ctx.window.add_action(a);
     }
@@ -1369,4 +1393,5 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
     app.set_accels_for_action("win.show-shortcuts", &["F1"]);
     app.set_accels_for_action("win.go-back", &["<Alt>Left"]);
     app.set_accels_for_action("win.go-forward", &["<Alt>Right"]);
+    app.set_accels_for_action("win.toggle-source", &["<Control>m"]);
 }
