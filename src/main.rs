@@ -138,6 +138,9 @@ struct WindowCtx {
     text_scale: Cell<f64>,
     /// kept alive for the text-scaling-factor changed signal
     interface_settings: RefCell<Option<gio::Settings>>,
+    /// Ctrl+B pins the Navigator open; unpinned it auto-hides and reveals
+    /// on a left-edge hover
+    sidebar_pinned: Cell<bool>,
     /// monotonically increasing per-load token, echoed back by the page's
     /// loadComplete so a superseded page cannot consume the next page's
     /// pending anchor or search highlight
@@ -212,6 +215,7 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
         app_zoom: Cell::new(1.0),
         text_scale: Cell::new(1.0),
         interface_settings: RefCell::new(None),
+        sidebar_pinned: Cell::new(false),
         load_seq: Cell::new(0),
         load_complete: Cell::new(false),
     });
@@ -326,14 +330,13 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                     }
                 }))
             };
-            let paned = gtk4::Paned::builder()
-                .orientation(gtk4::Orientation::Horizontal)
-                .start_child(&sb.widget)
-                .end_child(&webview)
-                .position(280)
-                .shrink_start_child(false)
-                .resize_start_child(false)
-                .build();
+            // The Navigator auto-hides: it overlays the content, revealed by
+            // a left-edge hover or pinned open with Ctrl+B — reading gets
+            // the full width by default.
+            sb.widget.set_halign(gtk4::Align::Start);
+            sb.widget.set_valign(gtk4::Align::Fill);
+            sb.widget.set_width_request(280);
+            sb.widget.set_visible(false);
 
             // Quick Open / Find in Files float above the content (§6.5).
             let search_overlay = {
@@ -384,7 +387,8 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
                 });
             }
             let overlay_container = gtk4::Overlay::new();
-            overlay_container.set_child(Some(&paned));
+            overlay_container.set_child(Some(&webview));
+            overlay_container.add_overlay(&sb.widget);
             search_overlay.widget.set_halign(gtk4::Align::Center);
             search_overlay.widget.set_valign(gtk4::Align::Start);
             search_overlay.widget.set_margin_top(48);
@@ -392,6 +396,27 @@ fn build_window(app: &gtk4::Application, target: Target, web_dir: PathBuf, start
             window.set_child(Some(&overlay_container));
             ctx.sidebar.replace(Some(sb.clone()));
             ctx.overlay.replace(Some(search_overlay));
+
+            // reveal on left-edge hover, retract when the pointer moves
+            // past the (unpinned) Navigator
+            {
+                let ctx = ctx.clone();
+                let sb = sb.clone();
+                let motion = gtk4::EventControllerMotion::new();
+                // capture phase: the WebView must not swallow pointer motion
+                motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+                motion.connect_motion(move |_, x, _| {
+                    if ctx.sidebar_pinned.get() {
+                        return;
+                    }
+                    if x <= 2.0 && !sb.widget.is_visible() {
+                        sb.widget.set_visible(true);
+                    } else if sb.widget.is_visible() && x > f64::from(sb.widget.width().max(280)) + 8.0 {
+                        sb.widget.set_visible(false);
+                    }
+                });
+                overlay_container.add_controller(motion);
+            }
 
             load_auto_index(&ctx, &dir);
 
@@ -722,7 +747,7 @@ fn apply_chrome_css(palette: &theme::Palette, fonts: &config::Fonts) {
     let css = format!(
         r#"
 window {{ background-color: {bg}; color: {fg}; }}
-.moremaid-sidebar {{ background-color: {bg}; color: {fg}; font-family: {font_body}; }}
+.moremaid-sidebar {{ background-color: {bg}; color: {fg}; font-family: {font_body}; border-right: 1px solid {muted}; }}
 .moremaid-sidebar listview, .moremaid-sidebar listview row {{ background: transparent; }}
 .moremaid-sidebar listview row:selected {{ background-color: {selection}; }}
 .moremaid-sidebar listview row:hover {{ background-color: {selection}; }}
@@ -1099,9 +1124,12 @@ fn install_actions(app: &gtk4::Application, ctx: &Rc<WindowCtx>) {
         }
     });
 
+    // Ctrl+B pins the Navigator open; unpinning returns it to auto-hide
     let toggle_sidebar = make("toggle-sidebar", ctx, |c| {
         if let Some(sb) = &*c.sidebar.borrow() {
-            sb.widget.set_visible(!sb.widget.is_visible());
+            let pinned = !c.sidebar_pinned.get();
+            c.sidebar_pinned.set(pinned);
+            sb.widget.set_visible(pinned);
         }
     });
     let quick_open = make("quick-open", ctx, |c| {

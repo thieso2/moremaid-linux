@@ -26,6 +26,10 @@ cat notes.md | moremaid       # stdin; relative links resolve from the CWD
 Files can also be dropped onto the window, or opened from a file manager
 (the package associates with `text/markdown` without grabbing the default).
 
+In directory mode the Navigator (folders, files, and the headings inside
+them) auto-hides so reading gets the full width: move the pointer to the
+left edge to reveal it, move away to dismiss, `Ctrl+B` to pin it open.
+
 ## Keyboard
 
 `?` or `F1` shows the complete shortcuts overlay. The essentials:
@@ -35,7 +39,7 @@ Files can also be dropped onto the window, or opened from a file manager
 | `Ctrl+P` or `/` | Quick Open — fuzzy filename finder |
 | `Ctrl+Shift+F` | Find in Files — full-text, streamed |
 | `Tab` | switch search mode (filename ↔ content) |
-| `Ctrl+B` | toggle the Navigator |
+| `Ctrl+B` | pin / unpin the Navigator |
 | `j` `k`, `gg` `G`, `Ctrl+D` `Ctrl+U` | scroll (vim keys are baseline) |
 | `Ctrl` `+` `-` `0` | zoom (on top of the system text scale) |
 | `Ctrl+N` | new window |
